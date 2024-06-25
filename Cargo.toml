@@ -19,7 +19,7 @@ can2040 = "0.1.5"
 alloc-cortex-m = "0.4"
 embedded-can = "0.4"
 # das seeduino bsp hat leider noch nicht die features die wir brauchen, also rp-pico
-# seeeduino-xiao-rp2040 = "0.6.0"
+seeeduino-xiao-rp2040 = "0.6.0"
 
 
 # cargo build/run

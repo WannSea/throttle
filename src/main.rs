@@ -6,14 +6,14 @@ use defmt::*;
 use defmt_rtt as _;
 use embedded_hal::delay::DelayNs;
 use embedded_hal::i2c::I2c;
-use embedded_hal::digital::OutputPin;
+use embedded_hal::digital::{OutputPin,InputPin};
 use alloc_cortex_m::CortexMHeap;
 use can2040::{Can2040, CanFrame};
 use embedded_can::nb::Can;
 use embedded_can::{ExtendedId, Frame};
 use panic_probe as _;
 
-use rp_pico as bsp;
+use seeeduino_xiao_rp2040 as bsp;
 
 const CONFIG_CANBUS_FREQUENCY: u32 = 250_000;
 const CONFIG_RP2040_CANBUS_GPIO_RX: u32 = 26;
@@ -87,12 +87,13 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
 
-    let mut led_pin = pins.gpio16.into_push_pull_output();
+    let mut led_green = pins.led_green.into_push_pull_output();
+    let mut led_red = pins.led_red.into_push_pull_output();
 
 
     // Configure two pins as being I²C, not GPIO
-    let sda_pin: Pin<_, FunctionI2C,_> = pins.gpio6.reconfigure();
-    let scl_pin: Pin<_, FunctionI2C,_> = pins.gpio7.reconfigure();
+    let sda_pin: Pin<_, FunctionI2C,_> = pins.sda.reconfigure();
+    let scl_pin: Pin<_, FunctionI2C,_> = pins.scl.reconfigure();
 
     // Create the I²C driver, using the two pre-configured pins. This will fail
     // at compile time if the pins are in the wrong mode, or if this I²C
@@ -111,28 +112,52 @@ fn main() -> ! {
         CONFIG_RP2040_CANBUS_GPIO_RX,
         CONFIG_RP2040_CANBUS_GPIO_TX,
     );
-
+    
+    let mut stop_pin = pins.a3.into_floating_input();
 
     let address: u8 = 0x06;
     let registers: [u8; 2] = [0x03,0x04];
     let mut angle_buff: [u8; 2] = [0; 2];
+    
+    let mut engine_locked = true;
 
     loop {
-        led_pin.set_high().unwrap(); 
-
+        led_green.set_high().unwrap(); 
         // use rp-pico 0.9
-        let throttle: i32 = match i2c.write_read(address, &registers, &mut angle_buff) {
+        let duty: i32 = match i2c.write_read(address, &registers, &mut angle_buff) {
             Ok(_) => {
                 let angle = ((angle_buff[0] as u16) << 6) | angle_buff[1] as u16;
                 debug!("buff: {}, angle: {}", angle_buff, angle);
                 (deadzone_map(angle_map(angle))*100_000.0) as i32
-
             },
             Err(_e) =>{
                 warn!("could not read from i2c");
                 0
             }
         };
+
+        let kill_cord_present = match stop_pin.is_low(){
+            Ok(present) => present,
+            Err(_) => false
+        }; 
+
+        if !kill_cord_present {
+            engine_locked=true;
+        }
+
+        if kill_cord_present && duty==0 {
+            engine_locked=false;
+        }
+
+        let throttle = if engine_locked {
+            led_red.set_low().unwrap();
+            0
+        } else {
+            led_red.set_high().unwrap();
+            duty
+        };
+
+
 
 
         info!("throttle: {}", throttle);
@@ -141,15 +166,15 @@ fn main() -> ! {
         let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame).inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
 
         timer.delay_ms(DELAY_MS/2);
-        led_pin.set_low().unwrap();
+        led_green.set_low().unwrap();
         timer.delay_ms(DELAY_MS/2);
     }
 }
 
 fn angle_map(angle: u16) -> f32 {
-    const ANGLE_MIN: u16 = 1500;
-    const ANGLE_CENTER: u16 = 4300;
-    const ANGLE_MAX: u16 = 7850;
+    const ANGLE_MIN: u16 = 400;
+    const ANGLE_CENTER: u16 = 4476;
+    const ANGLE_MAX: u16 = 7300;
 
     match angle > ANGLE_CENTER {
         true => ((angle - ANGLE_CENTER) as f32) / (ANGLE_MAX - ANGLE_CENTER) as f32,
