@@ -15,7 +15,8 @@ panic-probe = { version = "0.3", features = ["print-defmt"] }
 
 rp-pico = "0.9"
 
-can2040 = "0.1.5"
+can2040 = {git="https://github.com/WannSea/can2040-rust.git"}
+#can2040 = "0.1.5"
 alloc-cortex-m = "0.4"
 embedded-can = "0.4"
 # das seeduino bsp hat leider noch nicht die features die wir brauchen, also rp-pico
