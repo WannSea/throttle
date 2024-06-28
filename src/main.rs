@@ -127,8 +127,8 @@ fn main() -> ! {
         let duty: i32 = match i2c.write_read(address, &registers, &mut angle_buff) {
             Ok(_) => {
                 let angle = ((angle_buff[0] as u16) << 6) | angle_buff[1] as u16;
-                debug!("buff: {}, angle: {}", angle_buff, angle);
-                (deadzone_map(angle_map(angle))*100_000.0) as i32
+                info!("buff: {}, angle: {}", angle_buff, angle);
+                angle_map(angle)
             },
             Err(_e) =>{
                 warn!("could not read from i2c");
@@ -171,26 +171,22 @@ fn main() -> ! {
     }
 }
 
-fn angle_map(angle: u16) -> f32 {
-    const ANGLE_MIN: u16 = 400;
-    const ANGLE_CENTER: u16 = 4476;
-    const ANGLE_MAX: u16 = 7300;
+fn angle_map(angle: u16) -> i32 {
+    const ANGLE_MIN: u16 = 3720;
+    const ANGLE_DEADZONE_START: u16 = 9120;
+    const ANGLE_DEADZONE_END: u16 = 9888;
+    const ANGLE_MAX: u16 = 10250;
+    const SIGN: f32 = -1.0;
 
-    match angle > ANGLE_CENTER {
-        true => ((angle - ANGLE_CENTER) as f32) / (ANGLE_MAX - ANGLE_CENTER) as f32,
-        false => -((ANGLE_CENTER - angle) as f32) / (ANGLE_CENTER - ANGLE_MIN) as f32,
-    }
-}
-fn deadzone_map(input: f32) -> f32 {
-    let input = input.clamp(-1.0, 1.0);
-    const DEADZONE: f32 = 0.1;
+    let mut throttle: f32 = 0.0;
 
-    if input > DEADZONE {
-        return (input - DEADZONE) / (1.0 - DEADZONE);
+
+    if angle < ANGLE_DEADZONE_START {
+        throttle =  -((ANGLE_DEADZONE_START-angle) as f32)*SIGN / (ANGLE_DEADZONE_START-ANGLE_MIN) as f32
     }
-    if input < -DEADZONE {
-        return (input + DEADZONE) / (1.0 - DEADZONE);
+    if angle > ANGLE_DEADZONE_END {
+        throttle =  ((angle-ANGLE_DEADZONE_END) as f32)*SIGN / (ANGLE_MAX-ANGLE_DEADZONE_END) as f32
     }
 
-    return 0.0;
+    return (throttle.clamp(-1.0,1.0) * 100_000.0 ) as i32
 }
