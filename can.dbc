@@ -1,5 +1,8 @@
 BO_ 22 SETDUTY: 4 GASHEBEL
  SG_ SET_DUTY_signed : 7|32@0- (1,0) [0|0] "" DBG
 
+BO_ 254 SETDUTY: 4 GASHEBEL
+ SG_ SET_DUTY_signed : 7|32@0- (1,0) [0|0] "" DBG
+
 BO_ 100 SETDUTY: 2 GASHEBEL
  SG_ debug_angle : 7|16@0+ (1,0) [0|0] "" DBG

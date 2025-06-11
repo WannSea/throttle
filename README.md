@@ -41,3 +41,10 @@ If you get the error ``binary `cargo-embed` already exists`` during installation
 ## Build
 
 `cargo run`
+
+
+## Info:
+
+Green LED Blinking: Sending Duty
+Red LED: Lever Locked
+
