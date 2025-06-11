@@ -172,10 +172,11 @@ fn main() -> ! {
 }
 
 fn angle_map(angle: u16) -> i32 {
-    const ANGLE_MIN: u16 = 4300;
-    const ANGLE_DEADZONE_START: u16 = 9120;
-    const ANGLE_DEADZONE_END: u16 = 9888;
-    const ANGLE_MAX: u16 = 10250;
+    const ANGLE_MIN: u16 = 3500;
+    const ANGLE_DEADZONE_START: u16 = 9468;
+    const ANGLE_DEADZONE_END: u16 = 9800;
+    const ANGLE_MAX: u16 = 10300;
+
     const SIGN: f32 = -1.0;
 
     let mut throttle: f32 = 0.0;
