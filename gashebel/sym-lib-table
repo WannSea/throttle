@@ -1,0 +1,5 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "gashebel_custom")(type "KiCad")(uri "${KIPRJMOD}/gashebel_custom.kicad_sym")(options "")(descr ""))
+  (lib (name "wannsea")(type "KiCad")(uri "${KIPRJMOD}/1C23_powertrain_symbols.kicad_sym")(options "")(descr ""))
+)
