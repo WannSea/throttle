@@ -1,16 +1,16 @@
 #![no_std]
 #![no_main]
 
+use alloc_cortex_m::CortexMHeap;
 use bsp::entry;
+use can2040::{Can2040, CanFrame};
 use defmt::*;
 use defmt_rtt as _;
-use embedded_hal::delay::DelayNs;
-use embedded_hal::i2c::I2c;
-use embedded_hal::digital::{OutputPin,InputPin};
-use alloc_cortex_m::CortexMHeap;
-use can2040::{Can2040, CanFrame};
 use embedded_can::nb::Can;
 use embedded_can::{ExtendedId, Frame};
+use embedded_hal::delay::DelayNs;
+use embedded_hal::digital::{InputPin, OutputPin};
+use embedded_hal::i2c::I2c;
 use panic_probe as _;
 
 use seeeduino_xiao_rp2040 as bsp;
@@ -36,8 +36,7 @@ use bsp::hal::{
     pac,
     sio::Sio,
     watchdog::Watchdog,
-    Timer,
-    I2C,
+    Timer, I2C,
 };
 
 #[allow(dead_code)]
@@ -50,11 +49,11 @@ enum CanCommands {
     SetPos = 4,
 }
 
-const VESC_ID :u32 = 22;
-const CAN_ID_SET_DUTY: Option<ExtendedId> = ExtendedId::new((CanCommands::SetDuty as u32) << 8 | VESC_ID);
+const VESC_ID: u32 = 22;
+const CAN_ID_SET_DUTY: Option<ExtendedId> =
+    ExtendedId::new((CanCommands::SetDuty as u32) << 8 | VESC_ID);
 
 const DELAY_MS: u32 = 100;
-
 
 #[entry]
 fn main() -> ! {
@@ -90,10 +89,9 @@ fn main() -> ! {
     let mut led_green = pins.led_green.into_push_pull_output();
     let mut led_red = pins.led_red.into_push_pull_output();
 
-
     // Configure two pins as being I²C, not GPIO
-    let sda_pin: Pin<_, FunctionI2C,_> = pins.sda.reconfigure();
-    let scl_pin: Pin<_, FunctionI2C,_> = pins.scl.reconfigure();
+    let sda_pin: Pin<_, FunctionI2C, _> = pins.sda.reconfigure();
+    let scl_pin: Pin<_, FunctionI2C, _> = pins.scl.reconfigure();
 
     // Create the I²C driver, using the two pre-configured pins. This will fail
     // at compile time if the pins are in the wrong mode, or if this I²C
@@ -112,41 +110,44 @@ fn main() -> ! {
         CONFIG_RP2040_CANBUS_GPIO_RX,
         CONFIG_RP2040_CANBUS_GPIO_TX,
     );
-    
+
     let mut stop_pin = pins.a3.into_floating_input();
 
     let address: u8 = 0x06;
-    let registers: [u8; 2] = [0x03,0x04];
+    let registers: [u8; 2] = [0x03, 0x04];
     let mut angle_buff: [u8; 2] = [0; 2];
-    
+
     let mut engine_locked = true;
 
+    let mut smooth: [i32; 10] = [0; 10];
+    let mut index = 0;
+
     loop {
-        led_green.set_high().unwrap(); 
+        led_green.set_high().unwrap();
         // use rp-pico 0.9
         let duty: i32 = match i2c.write_read(address, &registers, &mut angle_buff) {
             Ok(_) => {
                 let angle = ((angle_buff[0] as u16) << 6) | angle_buff[1] as u16;
                 info!("buff: {}, angle: {}", angle_buff, angle);
                 angle_map(angle)
-            },
-            Err(_e) =>{
+            }
+            Err(_e) => {
                 warn!("could not read from i2c");
                 0
             }
         };
 
-        let kill_cord_present = match stop_pin.is_low(){
+        let kill_cord_present = match stop_pin.is_low() {
             Ok(present) => present,
-            Err(_) => false
-        }; 
+            Err(_) => false,
+        };
 
         if !kill_cord_present {
-            engine_locked=true;
+            engine_locked = true;
         }
 
-        if kill_cord_present && duty==0 {
-            engine_locked=false;
+        if kill_cord_present && duty == 0 {
+            engine_locked = false;
         }
 
         let throttle = if engine_locked {
@@ -157,17 +158,28 @@ fn main() -> ! {
             duty
         };
 
-
-
-
         info!("throttle: {}", throttle);
-        
-        let frame = CanFrame::new(CAN_ID_SET_DUTY.unwrap(),&throttle.to_be_bytes()).unwrap();
-        let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame).inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
+        if index >= smooth.len() {
+            index = 0;
+        }
 
-        timer.delay_ms(DELAY_MS/2);
+        if throttle == 0 {
+            continue;
+        }
+
+        smooth[index] = throttle;
+        let smoothed_throttle: i32 =
+            (smooth.iter().sum::<i32>() as f32 / smooth.len() as f32) as i32;
+
+        let frame =
+            CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &smoothed_throttle.to_be_bytes()).unwrap();
+        let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
+            .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
+
+        timer.delay_ms(DELAY_MS / 2);
         led_green.set_low().unwrap();
-        timer.delay_ms(DELAY_MS/2);
+        timer.delay_ms(DELAY_MS / 2);
+        index += 1;
     }
 }
 
@@ -181,13 +193,14 @@ fn angle_map(angle: u16) -> i32 {
 
     let mut throttle: f32 = 0.0;
 
-
     if angle < ANGLE_DEADZONE_START {
-        throttle =  -((ANGLE_DEADZONE_START-angle) as f32)*SIGN / (ANGLE_DEADZONE_START-ANGLE_MIN) as f32
+        throttle = -((ANGLE_DEADZONE_START - angle) as f32) * SIGN
+            / (ANGLE_DEADZONE_START - ANGLE_MIN) as f32
     }
     if angle > ANGLE_DEADZONE_END {
-        throttle =  ((angle-ANGLE_DEADZONE_END) as f32)*SIGN / (ANGLE_MAX-ANGLE_DEADZONE_END) as f32
+        throttle =
+            ((angle - ANGLE_DEADZONE_END) as f32) * SIGN / (ANGLE_MAX - ANGLE_DEADZONE_END) as f32
     }
 
-    return (throttle.clamp(-1.0,1.0) * 100_000.0 ) as i32
+    return (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32;
 }
