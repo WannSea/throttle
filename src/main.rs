@@ -51,12 +51,16 @@ const DELAY_MS: u32 = 100;
 const CONTROL_DT_S: f32 = DELAY_MS as f32 / 1000.0;
 
 // Acceleration tuning:
-// MAX_MOTOR_CURRENT_A is the torque limit. Raise carefully; the boat can draw
-// about 300 A, but start much lower during tests.
-const MAX_MOTOR_CURRENT_A: f32 = 80.0;
-const MAX_ERPM: i32 = 15_000;
-const CURRENT_RAMP_A_PER_S: f32 = 150.0;
-const RPM_RAMP_ERPM_PER_S: f32 = 25_000.0;
+// Current is the torque limit. Raise carefully; the boat can draw about 300 A,
+// but start much lower during tests. Reverse is intentionally softer.
+const MAX_FORWARD_CURRENT_A: f32 = 80.0;
+const MAX_REVERSE_CURRENT_A: f32 = 35.0;
+const MAX_FORWARD_ERPM: f32 = 15_000.0;
+const MAX_REVERSE_ERPM: f32 = 6_000.0;
+const FORWARD_CURRENT_RAMP_A_PER_S: f32 = 150.0;
+const REVERSE_CURRENT_RAMP_A_PER_S: f32 = 70.0;
+const FORWARD_RPM_RAMP_ERPM_PER_S: f32 = 25_000.0;
+const REVERSE_RPM_RAMP_ERPM_PER_S: f32 = 8_000.0;
 const RPM_MODE_MIN_THROTTLE: f32 = 0.08;
 
 // AS5600 magnetic encoder on the 5-pin connector.
@@ -248,14 +252,22 @@ impl VescController {
 
         if throttle == 0.0 {
             self.mode = ControlMode::Current;
-            self.current_cmd_a = ramp_towards(self.current_cmd_a, 0.0, CURRENT_RAMP_A_PER_S);
-            self.rpm_cmd = ramp_towards(self.rpm_cmd, 0.0, RPM_RAMP_ERPM_PER_S);
+            self.current_cmd_a = ramp_towards(self.current_cmd_a, 0.0, current_ramp_for(0.0));
+            self.rpm_cmd = ramp_towards(self.rpm_cmd, 0.0, rpm_ramp_for(0.0));
             return VescCommand::Current(self.current_cmd_a);
         }
 
         let shaped_throttle = throttle * throttle.abs();
-        let target_current = shaped_throttle * MAX_MOTOR_CURRENT_A;
-        let target_rpm = shaped_throttle * MAX_ERPM as f32;
+        let target_current = if shaped_throttle > 0.0 {
+            shaped_throttle * MAX_FORWARD_CURRENT_A
+        } else {
+            shaped_throttle * MAX_REVERSE_CURRENT_A
+        };
+        let target_rpm = if shaped_throttle > 0.0 {
+            shaped_throttle * MAX_FORWARD_ERPM
+        } else {
+            shaped_throttle * MAX_REVERSE_ERPM
+        };
 
         self.mode = if throttle.abs() < RPM_MODE_MIN_THROTTLE {
             ControlMode::Current
@@ -265,14 +277,17 @@ impl VescController {
 
         match self.mode {
             ControlMode::Current => {
-                self.current_cmd_a =
-                    ramp_towards(self.current_cmd_a, target_current, CURRENT_RAMP_A_PER_S);
+                self.current_cmd_a = ramp_towards(
+                    self.current_cmd_a,
+                    target_current,
+                    current_ramp_for(throttle),
+                );
                 self.rpm_cmd = 0.0;
                 VescCommand::Current(self.current_cmd_a)
             }
             ControlMode::Rpm => {
-                self.rpm_cmd = ramp_towards(self.rpm_cmd, target_rpm, RPM_RAMP_ERPM_PER_S);
-                self.current_cmd_a = target_current;
+                self.rpm_cmd = ramp_towards(self.rpm_cmd, target_rpm, rpm_ramp_for(throttle));
+                self.current_cmd_a = ramp_towards(self.current_cmd_a, 0.0, current_ramp_for(0.0));
                 VescCommand::Rpm(self.rpm_cmd)
             }
         }
@@ -289,6 +304,22 @@ fn ramp_towards(current: f32, target: f32, rate_per_second: f32) -> f32 {
         current - max_step
     } else {
         target
+    }
+}
+
+fn current_ramp_for(throttle: f32) -> f32 {
+    if throttle < 0.0 {
+        REVERSE_CURRENT_RAMP_A_PER_S
+    } else {
+        FORWARD_CURRENT_RAMP_A_PER_S
+    }
+}
+
+fn rpm_ramp_for(throttle: f32) -> f32 {
+    if throttle < 0.0 {
+        REVERSE_RPM_RAMP_ERPM_PER_S
+    } else {
+        FORWARD_RPM_RAMP_ERPM_PER_S
     }
 }
 

@@ -67,7 +67,7 @@ Kalibrierung in `src/main.rs`:
    - Wenn `offset` negativ wird: `ENCODER_FORWARD_SIGN = -1`
 5. Am Vorwärts-Endanschlag den Betrag von `offset` bei `ENCODER_FORWARD_MAX_COUNTS` eintragen.
 6. Am Rückwärts-Endanschlag den Betrag von `offset` bei `ENCODER_REVERSE_MAX_COUNTS` eintragen.
-7. `ENCODER_DEADZONE_COUNTS` ist die Nullzone. Wenn der Hebel in Ruhe nicht sauber 0 bleibt, etwas größer machen.
+7. `ENCODER_DEADZONE_COUNTS` ist die symmetrische Nullzone um 0: bei `35` gilt also `-35..+35` als 0. Wenn der Hebel in Ruhe nicht sauber 0 bleibt, etwas größer machen.
 
 Der 3-polige Hall-Stecker ist `HALL`, `GND`, `5V` und liegt in der Firmware auf `pins.a3`. Er wird aktuell nur als Kill-/Freigabe-Signal benutzt, nicht als Drehzahl- oder Richtungssensor. Wichtig: Die `HALL`-Leitung geht zum RP2040 und hat einen 3.3V-Pullup; der neue Sensor sollte deshalb einen Open-Collector/Open-Drain-Ausgang oder einen 3.3V-kompatiblen Ausgang haben, nicht aktiv 5V auf `HALL` treiben. Wenn der neue Hall-Sensor umgekehrt schaltet, ändere in `src/main.rs` nur:
 
@@ -92,17 +92,23 @@ CAN-Kontrolle: Beim alten Duty-Modus war bei VESC-ID `22` die Extended-ID `0x000
 Nur diese Tuning-Parameter in `src/main.rs` anfassen:
 
 ```rust
-const MAX_MOTOR_CURRENT_A: f32 = 80.0;
-const MAX_ERPM: i32 = 15_000;
-const CURRENT_RAMP_A_PER_S: f32 = 150.0;
-const RPM_RAMP_ERPM_PER_S: f32 = 25_000.0;
+const MAX_FORWARD_CURRENT_A: f32 = 80.0;
+const MAX_REVERSE_CURRENT_A: f32 = 35.0;
+const MAX_FORWARD_ERPM: f32 = 15_000.0;
+const MAX_REVERSE_ERPM: f32 = 6_000.0;
+const FORWARD_CURRENT_RAMP_A_PER_S: f32 = 150.0;
+const REVERSE_CURRENT_RAMP_A_PER_S: f32 = 70.0;
+const FORWARD_RPM_RAMP_ERPM_PER_S: f32 = 25_000.0;
+const REVERSE_RPM_RAMP_ERPM_PER_S: f32 = 8_000.0;
 const RPM_MODE_MIN_THROTTLE: f32 = 0.08;
 ```
 
 Tuning-Reihenfolge:
 
-1. `MAX_MOTOR_CURRENT_A` zuerst niedrig lassen, z.B. 50-80 A. Danach schrittweise erhöhen. Für den 300A-Bereich nur hochgehen, wenn Kabel, Akku, VESC, Kühlung und Propeller das sicher können.
-2. `MAX_ERPM` so einstellen, dass Vollgas ungefähr deiner gewünschten Maximaldrehzahl entspricht.
-3. Wenn das Boot beim Anfahren zu träge ist: `CURRENT_RAMP_A_PER_S` erhöhen. Wenn es rupft: senken.
-4. Wenn die Beschleunigung im Fahrbereich zu weich ist: `RPM_RAMP_ERPM_PER_S` erhöhen. Wenn sie pumpt oder nervös wirkt: senken.
-5. `RPM_MODE_MIN_THROTTLE` nur ändern, wenn der Übergang zwischen Anfahren und RPM-Regelung schlecht ist. Größer = länger Strommodus, kleiner = früher RPM-Modus.
+1. `MAX_FORWARD_CURRENT_A` zuerst niedrig lassen, z.B. 50-80 A. Danach schrittweise erhöhen. Für den 300A-Bereich nur hochgehen, wenn Kabel, Akku, VESC, Kühlung und Propeller das sicher können.
+2. `MAX_REVERSE_CURRENT_A` deutlich niedriger wählen, wenn Rückwärtsfahrt sanfter sein soll.
+3. `MAX_FORWARD_ERPM` und `MAX_REVERSE_ERPM` auf die gewünschte Maximaldrehzahl setzen.
+4. Wenn das Boot beim Anfahren vorwärts zu träge ist: `FORWARD_CURRENT_RAMP_A_PER_S` erhöhen. Wenn es rupft: senken.
+5. Für Rückwärtsfahrt entsprechend `REVERSE_CURRENT_RAMP_A_PER_S` niedriger lassen.
+6. Wenn die Beschleunigung im Fahrbereich zu weich ist: die passende `*_RPM_RAMP_ERPM_PER_S` erhöhen. Wenn sie pumpt oder nervös wirkt: senken.
+7. `RPM_MODE_MIN_THROTTLE` nur ändern, wenn der Übergang zwischen Anfahren und RPM-Regelung schlecht ist. Größer = länger Strommodus, kleiner = früher RPM-Modus.
