@@ -39,21 +39,25 @@ use bsp::hal::{
     Timer, I2C,
 };
 
-#[allow(dead_code)]
-#[repr(u8)]
-enum CanCommands {
-    SetDuty = 0,
-    SetCurrent = 1,
-    SetCurrentBrake = 2,
-    SetRpm = 3,
-    SetPos = 4,
-}
-
 const VESC_ID: u32 = 22;
-const CAN_ID_SET_DUTY: Option<ExtendedId> =
-    ExtendedId::new((CanCommands::SetDuty as u32) << 8 | VESC_ID);
+const CAN_PACKET_SET_CURRENT: u32 = 1;
+const CAN_PACKET_SET_RPM: u32 = 3;
+
+const CAN_ID_SET_CURRENT: Option<ExtendedId> =
+    ExtendedId::new((CAN_PACKET_SET_CURRENT << 8) | VESC_ID);
+const CAN_ID_SET_RPM: Option<ExtendedId> = ExtendedId::new((CAN_PACKET_SET_RPM << 8) | VESC_ID);
 
 const DELAY_MS: u32 = 100;
+const CONTROL_DT_S: f32 = DELAY_MS as f32 / 1000.0;
+
+// Acceleration tuning:
+// MAX_MOTOR_CURRENT_A is the torque limit. Raise carefully; the boat can draw
+// about 300 A, but start much lower during tests.
+const MAX_MOTOR_CURRENT_A: f32 = 80.0;
+const MAX_ERPM: i32 = 15_000;
+const CURRENT_RAMP_A_PER_S: f32 = 150.0;
+const RPM_RAMP_ERPM_PER_S: f32 = 25_000.0;
+const RPM_MODE_MIN_THROTTLE: f32 = 0.08;
 
 // AS5600 magnetic encoder on the 5-pin connector.
 const AS5600_I2C_ADDRESS: u8 = 0x36;
@@ -135,29 +139,29 @@ fn main() -> ! {
     let mut angle_buff: [u8; 2] = [0; 2];
 
     let mut engine_locked = true;
-
-    let mut smooth: [i32; 10] = [0; 10];
-    let mut index = 0;
+    let mut controller = VescController::new();
 
     loop {
         led_green.set_high().unwrap();
         // use rp-pico 0.9
-        let duty: i32 = match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
-            Ok(_) => {
-                let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
-                info!(
-                    "encoder raw: {}, offset: {}, duty: {}",
-                    angle,
-                    encoder_offset(angle),
-                    angle_map(angle)
-                );
-                angle_map(angle)
-            }
-            Err(_e) => {
-                warn!("could not read from i2c");
-                0
-            }
-        };
+        let requested_throttle: f32 =
+            match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
+                Ok(_) => {
+                    let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
+                    let throttle = throttle_from_angle(angle);
+                    info!(
+                        "encoder raw: {}, offset: {}, throttle: {}",
+                        angle,
+                        encoder_offset(angle),
+                        throttle
+                    );
+                    throttle
+                }
+                Err(_e) => {
+                    warn!("could not read from i2c");
+                    0.0
+                }
+            };
 
         let kill_cord_present = match hall_pin.is_low() {
             Ok(is_low) => is_low == HALL_PRESENT_WHEN_LOW,
@@ -168,48 +172,131 @@ fn main() -> ! {
             engine_locked = true;
         }
 
-        if kill_cord_present && duty == 0 {
+        if kill_cord_present && requested_throttle == 0.0 {
             engine_locked = false;
         }
 
         let throttle = if engine_locked {
             led_red.set_low().unwrap();
-            0
+            0.0
         } else {
             led_red.set_high().unwrap();
-            duty
+            requested_throttle
         };
 
         info!("throttle: {}", throttle);
-        if index >= smooth.len() {
-            index = 0;
-        }
 
-        if throttle == 0 {
-            continue;
-        }
+        let command = if engine_locked {
+            controller.stop_now()
+        } else {
+            controller.update(throttle)
+        };
+        let frame = match command {
+            VescCommand::Current(current) => CanFrame::new(
+                CAN_ID_SET_CURRENT.unwrap(),
+                &((current * 1000.0) as i32).to_be_bytes(),
+            )
+            .unwrap(),
+            VescCommand::Rpm(rpm) => {
+                CanFrame::new(CAN_ID_SET_RPM.unwrap(), &(rpm as i32).to_be_bytes()).unwrap()
+            }
+        };
 
-        smooth[index] = throttle;
-        let smoothed_throttle: i32 =
-            (smooth.iter().sum::<i32>() as f32 / smooth.len() as f32) as i32;
-
-        let frame =
-            CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &smoothed_throttle.to_be_bytes()).unwrap();
         let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
             .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
 
         timer.delay_ms(DELAY_MS / 2);
         led_green.set_low().unwrap();
         timer.delay_ms(DELAY_MS / 2);
-        index += 1;
     }
 }
 
-fn angle_map(angle: u16) -> i32 {
+enum VescCommand {
+    Current(f32),
+    Rpm(f32),
+}
+
+enum ControlMode {
+    Current,
+    Rpm,
+}
+
+struct VescController {
+    mode: ControlMode,
+    current_cmd_a: f32,
+    rpm_cmd: f32,
+}
+
+impl VescController {
+    fn new() -> Self {
+        Self {
+            mode: ControlMode::Current,
+            current_cmd_a: 0.0,
+            rpm_cmd: 0.0,
+        }
+    }
+
+    fn stop_now(&mut self) -> VescCommand {
+        self.mode = ControlMode::Current;
+        self.current_cmd_a = 0.0;
+        self.rpm_cmd = 0.0;
+        VescCommand::Current(0.0)
+    }
+
+    fn update(&mut self, throttle: f32) -> VescCommand {
+        let throttle = throttle.clamp(-1.0, 1.0);
+
+        if throttle == 0.0 {
+            self.mode = ControlMode::Current;
+            self.current_cmd_a = ramp_towards(self.current_cmd_a, 0.0, CURRENT_RAMP_A_PER_S);
+            self.rpm_cmd = ramp_towards(self.rpm_cmd, 0.0, RPM_RAMP_ERPM_PER_S);
+            return VescCommand::Current(self.current_cmd_a);
+        }
+
+        let shaped_throttle = throttle * throttle.abs();
+        let target_current = shaped_throttle * MAX_MOTOR_CURRENT_A;
+        let target_rpm = shaped_throttle * MAX_ERPM as f32;
+
+        self.mode = if throttle.abs() < RPM_MODE_MIN_THROTTLE {
+            ControlMode::Current
+        } else {
+            ControlMode::Rpm
+        };
+
+        match self.mode {
+            ControlMode::Current => {
+                self.current_cmd_a =
+                    ramp_towards(self.current_cmd_a, target_current, CURRENT_RAMP_A_PER_S);
+                self.rpm_cmd = 0.0;
+                VescCommand::Current(self.current_cmd_a)
+            }
+            ControlMode::Rpm => {
+                self.rpm_cmd = ramp_towards(self.rpm_cmd, target_rpm, RPM_RAMP_ERPM_PER_S);
+                self.current_cmd_a = target_current;
+                VescCommand::Rpm(self.rpm_cmd)
+            }
+        }
+    }
+}
+
+fn ramp_towards(current: f32, target: f32, rate_per_second: f32) -> f32 {
+    let max_step = rate_per_second * CONTROL_DT_S;
+    let diff = target - current;
+
+    if diff > max_step {
+        current + max_step
+    } else if diff < -max_step {
+        current - max_step
+    } else {
+        target
+    }
+}
+
+fn throttle_from_angle(angle: u16) -> f32 {
     let offset = encoder_offset(angle);
 
     if offset.abs() <= ENCODER_DEADZONE_COUNTS {
-        return 0;
+        return 0.0;
     }
 
     let throttle = if offset > 0 {
@@ -220,7 +307,7 @@ fn angle_map(angle: u16) -> i32 {
             / (ENCODER_REVERSE_MAX_COUNTS - ENCODER_DEADZONE_COUNTS) as f32
     };
 
-    (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32
+    throttle.clamp(-1.0, 1.0)
 }
 
 fn encoder_offset(angle: u16) -> i32 {

@@ -45,16 +45,16 @@ If you get the error ``binary `cargo-embed` already exists`` during installation
 
 ## Info:
 
-Green LED Blinking: Sending Duty
+Green LED Blinking: Sending CAN throttle command
 Red LED: Lever Locked
 
 ## Encoder / Hall kalibrieren
 
-Der weiße Encoder auf dem 5-poligen Stecker ist ein AS5600 und wird über I2C gelesen:
+Der verwendete Encoder mit dem 5-poligen Stecker ist ein AS5600 und wird über I2C gelesen:
 
 - Board-Stecker: `SDA`, `SCL`, `PWM/OUT`, `GND`, `3V3`
 - Am AS5600: `VCC -> 3V3`, `GND -> GND`, `SDA -> SDA`, `SCL -> SCL`
-- `DIR` hast du fest mit `VCC` verbunden. Die Software-Richtung wird trotzdem in `src/main.rs` über `ENCODER_FORWARD_SIGN` eingestellt.
+- `DIR` habe ich fest mit `VCC` verbunden. Die Software-Richtung wird trotzdem in `src/main.rs` über `ENCODER_FORWARD_SIGN` eingestellt.
 - `OUT/PWM` wird von der Firmware aktuell nicht benutzt.
 
 Kalibrierung in `src/main.rs`:
@@ -76,3 +76,33 @@ const HALL_PRESENT_WHEN_LOW: bool = true;
 ```
 
 auf `false`.
+
+## Beschleunigung tunen
+
+Die Firmware sendet nicht direkt `SET_DUTY` wie eine frühere Version, sondern wie die AI-Boot-Skripte:
+
+- kleines Gas: `SET_CURRENT`, also Drehmoment/Strom zum sauberen Anfahren
+- danach: `SET_RPM`, also ERPM-Ziel mit Rampe zum ruhigeren Beschleunigen
+
+CAN-Kontrolle: Beim alten Duty-Modus war bei VESC-ID `22` die Extended-ID `0x00000016`, weil `SET_DUTY = 0` und `0 << 8 | 22 = 0x16`. Jetzt sollte man stattdessen sehen:
+
+- `SET_CURRENT`: `0x00000116`, Payload = Ampere `* 1000` als 4 Byte big-endian
+- `SET_RPM`: `0x00000316`, Payload = ERPM als 4 Byte big-endian
+
+Nur diese Tuning-Parameter in `src/main.rs` anfassen:
+
+```rust
+const MAX_MOTOR_CURRENT_A: f32 = 80.0;
+const MAX_ERPM: i32 = 15_000;
+const CURRENT_RAMP_A_PER_S: f32 = 150.0;
+const RPM_RAMP_ERPM_PER_S: f32 = 25_000.0;
+const RPM_MODE_MIN_THROTTLE: f32 = 0.08;
+```
+
+Tuning-Reihenfolge:
+
+1. `MAX_MOTOR_CURRENT_A` zuerst niedrig lassen, z.B. 50-80 A. Danach schrittweise erhöhen. Für den 300A-Bereich nur hochgehen, wenn Kabel, Akku, VESC, Kühlung und Propeller das sicher können.
+2. `MAX_ERPM` so einstellen, dass Vollgas ungefähr deiner gewünschten Maximaldrehzahl entspricht.
+3. Wenn das Boot beim Anfahren zu träge ist: `CURRENT_RAMP_A_PER_S` erhöhen. Wenn es rupft: senken.
+4. Wenn die Beschleunigung im Fahrbereich zu weich ist: `RPM_RAMP_ERPM_PER_S` erhöhen. Wenn sie pumpt oder nervös wirkt: senken.
+5. `RPM_MODE_MIN_THROTTLE` nur ändern, wenn der Übergang zwischen Anfahren und RPM-Regelung schlecht ist. Größer = länger Strommodus, kleiner = früher RPM-Modus.
