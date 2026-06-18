@@ -55,6 +55,24 @@ const CAN_ID_SET_DUTY: Option<ExtendedId> =
 
 const DELAY_MS: u32 = 100;
 
+// AS5600 magnetic encoder on the 5-pin connector.
+const AS5600_I2C_ADDRESS: u8 = 0x36;
+const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
+
+// Encoder calibration:
+// 1. Put the throttle in neutral/rest position and copy the logged raw angle here.
+// 2. Move the throttle in the desired forward direction.
+// 3. If the logged signed offset gets negative, set ENCODER_FORWARD_SIGN to -1.
+const ENCODER_ZERO_RAW: u16 = 0;
+const ENCODER_FORWARD_SIGN: i32 = 1;
+const ENCODER_DEADZONE_COUNTS: i32 = 35;
+const ENCODER_FORWARD_MAX_COUNTS: i32 = 500;
+const ENCODER_REVERSE_MAX_COUNTS: i32 = 500;
+
+// 3-pin Hall connector on A3. Change this if the replacement Hall sensor
+// reports the opposite level when the magnet/kill-cord is present.
+const HALL_PRESENT_WHEN_LOW: bool = true;
+
 #[entry]
 fn main() -> ! {
     init_allocator();
@@ -111,10 +129,9 @@ fn main() -> ! {
         CONFIG_RP2040_CANBUS_GPIO_TX,
     );
 
-    let mut stop_pin = pins.a3.into_floating_input();
+    let mut hall_pin = pins.a3.into_floating_input();
 
-    let address: u8 = 0x06;
-    let registers: [u8; 2] = [0x03, 0x04];
+    let registers: [u8; 1] = [AS5600_RAW_ANGLE_REGISTER];
     let mut angle_buff: [u8; 2] = [0; 2];
 
     let mut engine_locked = true;
@@ -125,10 +142,15 @@ fn main() -> ! {
     loop {
         led_green.set_high().unwrap();
         // use rp-pico 0.9
-        let duty: i32 = match i2c.write_read(address, &registers, &mut angle_buff) {
+        let duty: i32 = match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
             Ok(_) => {
-                let angle = ((angle_buff[0] as u16) << 6) | angle_buff[1] as u16;
-                info!("buff: {}, angle: {}", angle_buff, angle);
+                let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
+                info!(
+                    "encoder raw: {}, offset: {}, duty: {}",
+                    angle,
+                    encoder_offset(angle),
+                    angle_map(angle)
+                );
                 angle_map(angle)
             }
             Err(_e) => {
@@ -137,8 +159,8 @@ fn main() -> ! {
             }
         };
 
-        let kill_cord_present = match stop_pin.is_low() {
-            Ok(present) => present,
+        let kill_cord_present = match hall_pin.is_low() {
+            Ok(is_low) => is_low == HALL_PRESENT_WHEN_LOW,
             Err(_) => false,
         };
 
@@ -184,23 +206,24 @@ fn main() -> ! {
 }
 
 fn angle_map(angle: u16) -> i32 {
-    const ANGLE_MIN: u16 = 3500;
-    const ANGLE_DEADZONE_START: u16 = 9468;
-    const ANGLE_DEADZONE_END: u16 = 9800;
-    const ANGLE_MAX: u16 = 10300;
+    let offset = encoder_offset(angle);
 
-    const SIGN: f32 = -1.0;
-
-    let mut throttle: f32 = 0.0;
-
-    if angle < ANGLE_DEADZONE_START {
-        throttle = -((ANGLE_DEADZONE_START - angle) as f32) * SIGN
-            / (ANGLE_DEADZONE_START - ANGLE_MIN) as f32
-    }
-    if angle > ANGLE_DEADZONE_END {
-        throttle =
-            ((angle - ANGLE_DEADZONE_END) as f32) * SIGN / (ANGLE_MAX - ANGLE_DEADZONE_END) as f32
+    if offset.abs() <= ENCODER_DEADZONE_COUNTS {
+        return 0;
     }
 
-    return (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32;
+    let throttle = if offset > 0 {
+        (offset - ENCODER_DEADZONE_COUNTS) as f32
+            / (ENCODER_FORWARD_MAX_COUNTS - ENCODER_DEADZONE_COUNTS) as f32
+    } else {
+        (offset + ENCODER_DEADZONE_COUNTS) as f32
+            / (ENCODER_REVERSE_MAX_COUNTS - ENCODER_DEADZONE_COUNTS) as f32
+    };
+
+    (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32
+}
+
+fn encoder_offset(angle: u16) -> i32 {
+    let raw_offset = ((angle as i32 - ENCODER_ZERO_RAW as i32 + 2048).rem_euclid(4096)) - 2048;
+    raw_offset * ENCODER_FORWARD_SIGN
 }

@@ -48,3 +48,31 @@ If you get the error ``binary `cargo-embed` already exists`` during installation
 Green LED Blinking: Sending Duty
 Red LED: Lever Locked
 
+## Encoder / Hall kalibrieren
+
+Der weiße Encoder auf dem 5-poligen Stecker ist ein AS5600 und wird über I2C gelesen:
+
+- Board-Stecker: `SDA`, `SCL`, `PWM/OUT`, `GND`, `3V3`
+- Am AS5600: `VCC -> 3V3`, `GND -> GND`, `SDA -> SDA`, `SCL -> SCL`
+- `DIR` hast du fest mit `VCC` verbunden. Die Software-Richtung wird trotzdem in `src/main.rs` über `ENCODER_FORWARD_SIGN` eingestellt.
+- `OUT/PWM` wird von der Firmware aktuell nicht benutzt.
+
+Kalibrierung in `src/main.rs`:
+
+1. Firmware flashen: `cargo run`.
+2. Im Log `encoder raw: ...` ansehen.
+3. Gashebel in Null-/Ruheposition halten und diesen Wert bei `ENCODER_ZERO_RAW` eintragen.
+4. Gashebel in die gewünschte Vorwärtsrichtung bewegen:
+   - Wenn `offset` positiv wird: `ENCODER_FORWARD_SIGN = 1`
+   - Wenn `offset` negativ wird: `ENCODER_FORWARD_SIGN = -1`
+5. Am Vorwärts-Endanschlag den Betrag von `offset` bei `ENCODER_FORWARD_MAX_COUNTS` eintragen.
+6. Am Rückwärts-Endanschlag den Betrag von `offset` bei `ENCODER_REVERSE_MAX_COUNTS` eintragen.
+7. `ENCODER_DEADZONE_COUNTS` ist die Nullzone. Wenn der Hebel in Ruhe nicht sauber 0 bleibt, etwas größer machen.
+
+Der 3-polige Hall-Stecker ist `HALL`, `GND`, `5V` und liegt in der Firmware auf `pins.a3`. Er wird aktuell nur als Kill-/Freigabe-Signal benutzt, nicht als Drehzahl- oder Richtungssensor. Wichtig: Die `HALL`-Leitung geht zum RP2040 und hat einen 3.3V-Pullup; der neue Sensor sollte deshalb einen Open-Collector/Open-Drain-Ausgang oder einen 3.3V-kompatiblen Ausgang haben, nicht aktiv 5V auf `HALL` treiben. Wenn der neue Hall-Sensor umgekehrt schaltet, ändere in `src/main.rs` nur:
+
+```rust
+const HALL_PRESENT_WHEN_LOW: bool = true;
+```
+
+auf `false`.
