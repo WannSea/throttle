@@ -60,7 +60,12 @@ Der verwendete Encoder mit dem 5-poligen Stecker ist ein AS5600 und wird über I
 Kalibrierung in `src/main.rs`:
 
 1. Firmware flashen: `cargo run`.
-2. Im Log `encoder raw: ...` ansehen.
+2. USB-Serial-Log öffnen und `encoder raw: ...` ansehen. Unter Linux z.B.:
+   ```sh
+   ls /dev/ttyACM*
+   picocom -b 115200 /dev/ttyACM0
+   ```
+   Falls der Port nicht `/dev/ttyACM0` ist, den neu erschienenen `/dev/ttyACM...` Port nehmen. Die Baudrate ist bei USB-Serial praktisch egal, `115200` passt aber für die meisten Terminalprogramme.
 3. Gashebel in Null-/Ruheposition halten und diesen Wert bei `ENCODER_ZERO_RAW` eintragen.
 4. Gashebel in die gewünschte Vorwärtsrichtung bewegen:
    - Wenn `offset` positiv wird: `ENCODER_FORWARD_SIGN = 1`

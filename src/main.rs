@@ -4,6 +4,7 @@
 use alloc_cortex_m::CortexMHeap;
 use bsp::entry;
 use can2040::{Can2040, CanFrame};
+use core::fmt::Write;
 use defmt::*;
 use defmt_rtt as _;
 use embedded_can::nb::Can;
@@ -11,7 +12,14 @@ use embedded_can::{ExtendedId, Frame};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::i2c::I2c;
+use heapless::String;
 use panic_probe as _;
+use usb_device::{
+    class_prelude::UsbBusAllocator,
+    device::{StringDescriptors, UsbDevice},
+    prelude::*,
+};
+use usbd_serial::SerialPort;
 
 use seeeduino_xiao_rp2040 as bsp;
 
@@ -35,6 +43,7 @@ use bsp::hal::{
     gpio::{FunctionI2C, Pin},
     pac,
     sio::Sio,
+    usb::UsbBus,
     watchdog::Watchdog,
     Timer, I2C,
 };
@@ -139,6 +148,23 @@ fn main() -> ! {
 
     let mut hall_pin = pins.a3.into_floating_input();
 
+    let usb_bus = UsbBusAllocator::new(UsbBus::new(
+        pac.USBCTRL_REGS,
+        pac.USBCTRL_DPRAM,
+        clocks.usb_clock,
+        true,
+        &mut pac.RESETS,
+    ));
+    let mut serial = SerialPort::new(&usb_bus);
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
+        .strings(&[StringDescriptors::default()
+            .manufacturer("WannSea")
+            .product("Gashebel Setup Serial")
+            .serial_number("throttle")])
+        .unwrap()
+        .device_class(2)
+        .build();
+
     let registers: [u8; 1] = [AS5600_RAW_ANGLE_REGISTER];
     let mut angle_buff: [u8; 2] = [0; 2];
 
@@ -146,6 +172,8 @@ fn main() -> ! {
     let mut controller = VescController::new();
 
     loop {
+        poll_usb_serial(&mut usb_dev, &mut serial);
+
         led_green.set_high().unwrap();
         // use rp-pico 0.9
         let requested_throttle: f32 =
@@ -153,16 +181,19 @@ fn main() -> ! {
                 Ok(_) => {
                     let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
                     let throttle = throttle_from_angle(angle);
+                    let offset = encoder_offset(angle);
                     info!(
                         "encoder raw: {}, offset: {}, throttle: {}",
                         angle,
-                        encoder_offset(angle),
+                        offset,
                         throttle
                     );
+                    write_usb_encoder_log(&mut serial, angle, offset, throttle);
                     throttle
                 }
                 Err(_e) => {
                     warn!("could not read from i2c");
+                    write_usb_line(&mut serial, "could not read from i2c\r\n");
                     0.0
                 }
             };
@@ -213,6 +244,28 @@ fn main() -> ! {
         led_green.set_low().unwrap();
         timer.delay_ms(DELAY_MS / 2);
     }
+}
+
+fn poll_usb_serial(usb_dev: &mut UsbDevice<UsbBus>, serial: &mut SerialPort<UsbBus>) {
+    if usb_dev.poll(&mut [serial]) {
+        let mut buf = [0u8; 64];
+        let _ = serial.read(&mut buf);
+    }
+}
+
+fn write_usb_encoder_log(serial: &mut SerialPort<UsbBus>, angle: u16, offset: i32, throttle: f32) {
+    let mut line: String<96> = String::new();
+    let throttle_milli = (throttle * 1000.0) as i32;
+    let _ = writeln!(
+        &mut line,
+        "encoder raw: {}, offset: {}, throttle_milli: {}\r",
+        angle, offset, throttle_milli
+    );
+    let _ = serial.write(line.as_bytes());
+}
+
+fn write_usb_line(serial: &mut SerialPort<UsbBus>, line: &str) {
+    let _ = serial.write(line.as_bytes());
 }
 
 enum VescCommand {

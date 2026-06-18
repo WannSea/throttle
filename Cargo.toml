@@ -21,6 +21,9 @@ alloc-cortex-m = "0.4"
 embedded-can = "0.4"
 # das seeduino bsp hat leider noch nicht die features die wir brauchen, also rp-pico
 seeeduino-xiao-rp2040 = "0.6.0"
+heapless = "0.8"
+usb-device = "0.3"
+usbd-serial = "0.2"
 
 
 # cargo build/run
