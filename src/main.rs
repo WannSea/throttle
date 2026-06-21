@@ -62,17 +62,17 @@ const CONTROL_DT_S: f32 = DELAY_MS as f32 / 1000.0;
 // Acceleration tuning:
 // Current is the torque limit. Raise carefully; the boat can draw about 300 A,
 // but start much lower during tests. Reverse is intentionally softer.
-const MAX_FORWARD_CURRENT_A: f32 = 80.0;
-const MAX_REVERSE_CURRENT_A: f32 = 35.0;
+const MAX_FORWARD_CURRENT_A: f32 = 150.0;
+const MAX_REVERSE_CURRENT_A: f32 = 50.0;
 const MAX_FORWARD_ERPM: f32 = 15_000.0;
 const MAX_REVERSE_ERPM: f32 = 6_000.0;
 const FORWARD_CURRENT_RAMP_A_PER_S: f32 = 150.0;
 const REVERSE_CURRENT_RAMP_A_PER_S: f32 = 70.0;
-const FORWARD_RPM_RAMP_ERPM_PER_S: f32 = 25_000.0;
-const REVERSE_RPM_RAMP_ERPM_PER_S: f32 = 8_000.0;
-const RPM_MODE_MIN_THROTTLE: f32 = 0.08;
+const FORWARD_RPM_RAMP_ERPM_PER_S: f32 = 5_000.0;
+const REVERSE_RPM_RAMP_ERPM_PER_S: f32 = 5_000.0;
+const RPM_MODE_MIN_THROTTLE: f32 = 0.1;
 
-// AS5600 magnetic encoder on the 5-pin connector.
+// AS5600 magnetic encoder on the 5-pin connector
 const AS5600_I2C_ADDRESS: u8 = 0x36;
 const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
 
@@ -80,15 +80,16 @@ const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
 // 1. Put the throttle in neutral/rest position and copy the logged raw angle here.
 // 2. Move the throttle in the desired forward direction.
 // 3. If the logged signed offset gets negative, set ENCODER_FORWARD_SIGN to -1.
-const ENCODER_ZERO_RAW: u16 = 0;
+const ENCODER_ZERO_RAW: u16 = 380;
 const ENCODER_FORWARD_SIGN: i32 = 1;
-const ENCODER_DEADZONE_COUNTS: i32 = 35;
-const ENCODER_FORWARD_MAX_COUNTS: i32 = 500;
-const ENCODER_REVERSE_MAX_COUNTS: i32 = 500;
+const ENCODER_DEADZONE_COUNTS: i32 = 60;
+const ENCODER_FORWARD_MAX_COUNTS: i32 = 3560;
+const ENCODER_REVERSE_MAX_COUNTS: i32 = 3560;
 
 // 3-pin Hall connector on A3. Change this if the replacement Hall sensor
 // reports the opposite level when the magnet/kill-cord is present.
 const HALL_PRESENT_WHEN_LOW: bool = true;
+const PRETEND_HALL_PIN_ON: bool = true;
 
 #[entry]
 fn main() -> ! {
@@ -198,9 +199,13 @@ fn main() -> ! {
                 }
             };
 
-        let kill_cord_present = match hall_pin.is_low() {
-            Ok(is_low) => is_low == HALL_PRESENT_WHEN_LOW,
-            Err(_) => false,
+        let kill_cord_present = if PRETEND_HALL_PIN_ON {
+            true
+        } else {
+            match hall_pin.is_low() {
+                Ok(is_low) => is_low == HALL_PRESENT_WHEN_LOW,
+                Err(_) => false,
+            }
         };
 
         if !kill_cord_present {
