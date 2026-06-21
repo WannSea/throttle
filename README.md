@@ -59,6 +59,14 @@ Der verwendete Encoder mit dem 5-poligen Stecker ist ein AS5600 und wird über I
 
 Kalibrierung in `src/main.rs`:
 
+Für CAN-/Fahrtests kann USB-Logging komplett ausgeschaltet werden, damit die Firmware möglichst nah an der alten Version läuft:
+
+```rust
+const ENABLE_USB_LOGGING: bool = false;
+```
+
+Für Encoder-Kalibrierung über USB-C auf `true` setzen.
+
 1. Firmware flashen: `cargo run`.
 2. USB-Serial-Log öffnen und `encoder raw: ...` ansehen. Unter Linux z.B.:
    ```sh
@@ -81,6 +89,14 @@ const HALL_PRESENT_WHEN_LOW: bool = true;
 ```
 
 auf `false`.
+
+Für Werkstatt-/CAN-Tests kann die Hall-Prüfung überbrückt werden:
+
+```rust
+const PRETEND_HALL_PIN_ON: bool = true;
+```
+
+Auf `true` setzen, wenn die Firmware so tun soll, als wäre der Hall-/Kill-Sensor immer aktiv.
 
 ## Beschleunigung tunen
 

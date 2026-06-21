@@ -26,6 +26,7 @@ use seeeduino_xiao_rp2040 as bsp;
 const CONFIG_CANBUS_FREQUENCY: u32 = 250_000;
 const CONFIG_RP2040_CANBUS_GPIO_RX: u32 = 26;
 const CONFIG_RP2040_CANBUS_GPIO_TX: u32 = 27;
+const ENABLE_USB_LOGGING: bool = false;
 
 #[global_allocator]
 pub static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
@@ -48,33 +49,21 @@ use bsp::hal::{
     Timer, I2C,
 };
 
+#[allow(dead_code)]
+#[repr(u8)]
+enum CanCommands {
+    SetDuty = 0,
+    SetCurrent = 1,
+    SetCurrentBrake = 2,
+    SetRpm = 3,
+    SetPos = 4,
+}
+
 const VESC_ID: u32 = 22;
-const CAN_PACKET_SET_DUTY: u32 = 0;
-const CAN_PACKET_SET_CURRENT: u32 = 1;
-const CAN_PACKET_SET_RPM: u32 = 3;
-
 const CAN_ID_SET_DUTY: Option<ExtendedId> =
-    ExtendedId::new((CAN_PACKET_SET_DUTY << 8) | VESC_ID);
-const CAN_ID_SET_CURRENT: Option<ExtendedId> =
-    ExtendedId::new((CAN_PACKET_SET_CURRENT << 8) | VESC_ID);
-const CAN_ID_SET_RPM: Option<ExtendedId> = ExtendedId::new((CAN_PACKET_SET_RPM << 8) | VESC_ID);
+    ExtendedId::new((CanCommands::SetDuty as u32) << 8 | VESC_ID);
 
-const DRIVE_MODE: DriveMode = DriveMode::Duty;
 const DELAY_MS: u32 = 100;
-const CONTROL_DT_S: f32 = DELAY_MS as f32 / 1000.0;
-
-// Acceleration tuning:
-// Current is the torque limit. Raise carefully; the boat can draw about 300 A,
-// but start much lower during tests. Reverse is intentionally softer.
-const MAX_FORWARD_CURRENT_A: f32 = 150.0;
-const MAX_REVERSE_CURRENT_A: f32 = 50.0;
-const MAX_FORWARD_ERPM: f32 = 15_000.0;
-const MAX_REVERSE_ERPM: f32 = 6_000.0;
-const FORWARD_CURRENT_RAMP_A_PER_S: f32 = 150.0;
-const REVERSE_CURRENT_RAMP_A_PER_S: f32 = 70.0;
-const FORWARD_RPM_RAMP_ERPM_PER_S: f32 = 5_000.0;
-const REVERSE_RPM_RAMP_ERPM_PER_S: f32 = 5_000.0;
-const RPM_MODE_MIN_THROTTLE: f32 = 0.1;
 
 // AS5600 magnetic encoder on the 5-pin connector
 const AS5600_I2C_ADDRESS: u8 = 0x36;
@@ -86,19 +75,14 @@ const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
 // 3. If the logged signed offset gets negative, set ENCODER_FORWARD_SIGN to -1.
 const ENCODER_ZERO_RAW: u16 = 380;
 const ENCODER_FORWARD_SIGN: i32 = 1;
-const ENCODER_DEADZONE_COUNTS: i32 = 60;
+const ENCODER_DEADZONE_COUNTS: i32 = 50;
 const ENCODER_FORWARD_MAX_COUNTS: i32 = 3560;
 const ENCODER_REVERSE_MAX_COUNTS: i32 = 3560;
 
 // 3-pin Hall connector on A3. Change this if the replacement Hall sensor
 // reports the opposite level when the magnet/kill-cord is present.
 const HALL_PRESENT_WHEN_LOW: bool = true;
-
-#[allow(dead_code)]
-enum DriveMode {
-    Duty,
-    CurrentAndRpm,
-}
+const PRETEND_HALL_PIN_ON: bool = true;
 
 #[entry]
 fn main() -> ! {
@@ -158,135 +142,152 @@ fn main() -> ! {
 
     let mut hall_pin = pins.a3.into_floating_input();
 
-    let usb_bus = UsbBusAllocator::new(UsbBus::new(
-        pac.USBCTRL_REGS,
-        pac.USBCTRL_DPRAM,
-        clocks.usb_clock,
-        true,
-        &mut pac.RESETS,
-    ));
-    let mut serial = SerialPort::new(&usb_bus);
-    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
-        .strings(&[StringDescriptors::default()
-            .manufacturer("WannSea")
-            .product("Gashebel Setup Serial")
-            .serial_number("throttle")])
-        .unwrap()
-        .device_class(2)
-        .build();
+    let usb_bus = if ENABLE_USB_LOGGING {
+        Some(UsbBusAllocator::new(UsbBus::new(
+            pac.USBCTRL_REGS,
+            pac.USBCTRL_DPRAM,
+            clocks.usb_clock,
+            true,
+            &mut pac.RESETS,
+        )))
+    } else {
+        None
+    };
+    let mut serial = usb_bus.as_ref().map(SerialPort::new);
+    let mut usb_dev = usb_bus.as_ref().map(|usb_bus| {
+        UsbDeviceBuilder::new(usb_bus, UsbVidPid(0x16c0, 0x27dd))
+            .strings(&[StringDescriptors::default()
+                .manufacturer("WannSea")
+                .product("Gashebel Setup Serial")
+                .serial_number("throttle")])
+            .unwrap()
+            .device_class(2)
+            .build()
+    });
 
     let registers: [u8; 1] = [AS5600_RAW_ANGLE_REGISTER];
     let mut angle_buff: [u8; 2] = [0; 2];
 
     let mut engine_locked = true;
-    let mut controller = VescController::new();
-    let mut duty_controller = DutyController::new();
+    let mut smooth: [i32; 10] = [0; 10];
+    let mut index = 0;
 
     loop {
         poll_usb_serial(&mut usb_dev, &mut serial);
 
         led_green.set_high().unwrap();
         // use rp-pico 0.9
-        let requested_throttle: f32 =
-            match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
-                Ok(_) => {
-                    let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
-                    let throttle = throttle_from_angle(angle);
-                    let offset = encoder_offset(angle);
-                    info!(
-                        "encoder raw: {}, offset: {}, throttle: {}",
-                        angle,
-                        offset,
-                        throttle
-                    );
-                    write_usb_encoder_log(&mut serial, angle, offset, throttle);
-                    throttle
-                }
-                Err(_e) => {
-                    warn!("could not read from i2c");
-                    write_usb_line(&mut serial, "could not read from i2c\r\n");
-                    0.0
-                }
-            };
+        let duty: i32 = match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
+            Ok(_) => {
+                let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
+                let throttle = throttle_from_angle(angle);
+                let offset = encoder_offset(angle);
+                info!(
+                    "encoder raw: {}, offset: {}, throttle: {}",
+                    angle, offset, throttle
+                );
+                write_usb_encoder_log(&mut serial, angle, offset, throttle);
+                duty_from_throttle(throttle)
+            }
+            Err(_e) => {
+                warn!("could not read from i2c");
+                write_usb_line(&mut serial, "could not read from i2c\r\n");
+                0
+            }
+        };
 
-        let kill_cord_present = match hall_pin.is_low() {
-            Ok(is_low) => is_low == HALL_PRESENT_WHEN_LOW,
-            Err(_) => false,
+        let kill_cord_present = if PRETEND_HALL_PIN_ON {
+            true
+        } else {
+            match hall_pin.is_low() {
+                Ok(is_low) => is_low == HALL_PRESENT_WHEN_LOW,
+                Err(_) => false,
+            }
         };
 
         if !kill_cord_present {
             engine_locked = true;
         }
 
-        if kill_cord_present && requested_throttle == 0.0 {
+        if kill_cord_present && duty == 0 {
             engine_locked = false;
         }
 
         let throttle = if engine_locked {
             led_red.set_low().unwrap();
-            0.0
+            0
         } else {
             led_red.set_high().unwrap();
-            requested_throttle
+            duty
         };
 
         info!("throttle: {}", throttle);
 
-        let frame = match DRIVE_MODE {
-            DriveMode::Duty => duty_controller.update(throttle).map(|duty| {
-                CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &duty.to_be_bytes()).unwrap()
-            }),
-            DriveMode::CurrentAndRpm => {
-                let command = if engine_locked {
-                    controller.stop_now()
-                } else {
-                    controller.update(throttle)
-                };
-                Some(match command {
-                    VescCommand::Current(current) => CanFrame::new(
-                        CAN_ID_SET_CURRENT.unwrap(),
-                        &((current * 1000.0) as i32).to_be_bytes(),
-                    )
-                    .unwrap(),
-                    VescCommand::Rpm(rpm) => {
-                        CanFrame::new(CAN_ID_SET_RPM.unwrap(), &(rpm as i32).to_be_bytes())
-                            .unwrap()
-                    }
-                })
-            }
-        };
-
-        if let Some(frame) = frame {
-            let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
-                .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
+        if index >= smooth.len() {
+            index = 0;
         }
 
-        delay_ms_with_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
+        if throttle == 0 {
+            continue;
+        }
+
+        smooth[index] = throttle;
+        let smoothed_throttle: i32 =
+            (smooth.iter().sum::<i32>() as f32 / smooth.len() as f32) as i32;
+
+        let frame =
+            CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &smoothed_throttle.to_be_bytes()).unwrap();
+        let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
+            .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
+
+        delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
         led_green.set_low().unwrap();
-        delay_ms_with_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
+        delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
+        index += 1;
     }
 }
 
-fn delay_ms_with_usb_poll(
+fn delay_ms_maybe_usb_poll(
     timer: &mut Timer,
-    usb_dev: &mut UsbDevice<UsbBus>,
-    serial: &mut SerialPort<UsbBus>,
+    usb_dev: &mut Option<UsbDevice<UsbBus>>,
+    serial: &mut Option<SerialPort<UsbBus>>,
     ms: u32,
 ) {
+    if !ENABLE_USB_LOGGING {
+        timer.delay_ms(ms);
+        return;
+    }
+
     for _ in 0..ms {
         poll_usb_serial(usb_dev, serial);
         timer.delay_ms(1);
     }
 }
 
-fn poll_usb_serial(usb_dev: &mut UsbDevice<UsbBus>, serial: &mut SerialPort<UsbBus>) {
+fn poll_usb_serial(
+    usb_dev: &mut Option<UsbDevice<UsbBus>>,
+    serial: &mut Option<SerialPort<UsbBus>>,
+) {
+    let (Some(usb_dev), Some(serial)) = (usb_dev.as_mut(), serial.as_mut()) else {
+        return;
+    };
+
     if usb_dev.poll(&mut [serial]) {
         let mut buf = [0u8; 64];
         let _ = serial.read(&mut buf);
     }
 }
 
-fn write_usb_encoder_log(serial: &mut SerialPort<UsbBus>, angle: u16, offset: i32, throttle: f32) {
+fn write_usb_encoder_log(
+    serial: &mut Option<SerialPort<UsbBus>>,
+    angle: u16,
+    offset: i32,
+    throttle: f32,
+) {
+    if !ENABLE_USB_LOGGING {
+        return;
+    }
+
     let mut line: String<96> = String::new();
     let throttle_milli = (throttle * 1000.0) as i32;
     let _ = writeln!(
@@ -294,152 +295,17 @@ fn write_usb_encoder_log(serial: &mut SerialPort<UsbBus>, angle: u16, offset: i3
         "encoder raw: {}, offset: {}, throttle_milli: {}\r",
         angle, offset, throttle_milli
     );
-    let _ = serial.write(line.as_bytes());
+    write_usb_line(serial, line.as_str());
 }
 
-fn write_usb_line(serial: &mut SerialPort<UsbBus>, line: &str) {
-    let _ = serial.write(line.as_bytes());
-}
-
-enum VescCommand {
-    Current(f32),
-    Rpm(f32),
-}
-
-struct DutyController {
-    smooth: [i32; 10],
-    index: usize,
-}
-
-impl DutyController {
-    fn new() -> Self {
-        Self {
-            smooth: [0; 10],
-            index: 0,
-        }
-    }
-
-    fn update(&mut self, throttle: f32) -> Option<i32> {
-        let throttle = (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32;
-
-        if self.index >= self.smooth.len() {
-            self.index = 0;
-        }
-
-        if throttle == 0 {
-            return None;
-        }
-
-        self.smooth[self.index] = throttle;
-        let smoothed_throttle: i32 =
-            (self.smooth.iter().sum::<i32>() as f32 / self.smooth.len() as f32) as i32;
-        self.index += 1;
-
-        Some(smoothed_throttle)
+fn write_usb_line(serial: &mut Option<SerialPort<UsbBus>>, line: &str) {
+    if let Some(serial) = serial.as_mut() {
+        let _ = serial.write(line.as_bytes());
     }
 }
 
-enum ControlMode {
-    Current,
-    Rpm,
-}
-
-struct VescController {
-    mode: ControlMode,
-    current_cmd_a: f32,
-    rpm_cmd: f32,
-}
-
-impl VescController {
-    fn new() -> Self {
-        Self {
-            mode: ControlMode::Current,
-            current_cmd_a: 0.0,
-            rpm_cmd: 0.0,
-        }
-    }
-
-    fn stop_now(&mut self) -> VescCommand {
-        self.mode = ControlMode::Current;
-        self.current_cmd_a = 0.0;
-        self.rpm_cmd = 0.0;
-        VescCommand::Current(0.0)
-    }
-
-    fn update(&mut self, throttle: f32) -> VescCommand {
-        let throttle = throttle.clamp(-1.0, 1.0);
-
-        if throttle == 0.0 {
-            self.mode = ControlMode::Current;
-            self.current_cmd_a = ramp_towards(self.current_cmd_a, 0.0, current_ramp_for(0.0));
-            self.rpm_cmd = ramp_towards(self.rpm_cmd, 0.0, rpm_ramp_for(0.0));
-            return VescCommand::Current(self.current_cmd_a);
-        }
-
-        let shaped_throttle = throttle * throttle.abs();
-        let target_current = if shaped_throttle > 0.0 {
-            shaped_throttle * MAX_FORWARD_CURRENT_A
-        } else {
-            shaped_throttle * MAX_REVERSE_CURRENT_A
-        };
-        let target_rpm = if shaped_throttle > 0.0 {
-            shaped_throttle * MAX_FORWARD_ERPM
-        } else {
-            shaped_throttle * MAX_REVERSE_ERPM
-        };
-
-        self.mode = if throttle.abs() < RPM_MODE_MIN_THROTTLE {
-            ControlMode::Current
-        } else {
-            ControlMode::Rpm
-        };
-
-        match self.mode {
-            ControlMode::Current => {
-                self.current_cmd_a = ramp_towards(
-                    self.current_cmd_a,
-                    target_current,
-                    current_ramp_for(throttle),
-                );
-                self.rpm_cmd = 0.0;
-                VescCommand::Current(self.current_cmd_a)
-            }
-            ControlMode::Rpm => {
-                self.rpm_cmd = ramp_towards(self.rpm_cmd, target_rpm, rpm_ramp_for(throttle));
-                self.current_cmd_a = ramp_towards(self.current_cmd_a, 0.0, current_ramp_for(0.0));
-                VescCommand::Rpm(self.rpm_cmd)
-            }
-        }
-    }
-}
-
-fn ramp_towards(current: f32, target: f32, rate_per_second: f32) -> f32 {
-    let max_step = rate_per_second * CONTROL_DT_S;
-    let diff = target - current;
-
-    if diff > max_step {
-        current + max_step
-    } else if diff < -max_step {
-        current - max_step
-    } else {
-        target
-    }
-}
-
-fn current_ramp_for(throttle: f32) -> f32 {
-    if throttle < 0.0 {
-        REVERSE_CURRENT_RAMP_A_PER_S
-    } else {
-        FORWARD_CURRENT_RAMP_A_PER_S
-    }
-}
-
-fn rpm_ramp_for(throttle: f32) -> f32 {
-    if throttle < 0.0 {
-        REVERSE_RPM_RAMP_ERPM_PER_S
-    } else {
-        FORWARD_RPM_RAMP_ERPM_PER_S
-    }
+fn duty_from_throttle(throttle: f32) -> i32 {
+    (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32
 }
 
 fn throttle_from_angle(angle: u16) -> f32 {
@@ -461,6 +327,6 @@ fn throttle_from_angle(angle: u16) -> f32 {
 }
 
 fn encoder_offset(angle: u16) -> i32 {
-    let raw_offset = ((angle as i32 - ENCODER_ZERO_RAW as i32 + 2048).rem_euclid(4096)) - 2048;
+    let raw_offset = angle as i32 - ENCODER_ZERO_RAW as i32;
     raw_offset * ENCODER_FORWARD_SIGN
 }
