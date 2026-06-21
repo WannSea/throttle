@@ -84,12 +84,23 @@ auf `false`.
 
 ## Beschleunigung tunen
 
-Die Firmware sendet nicht direkt `SET_DUTY` wie eine frühere Version, sondern wie die AI-Boot-Skripte:
+Der Sendemodus wird in `src/main.rs` gesetzt:
+
+```rust
+const DRIVE_MODE: DriveMode = DriveMode::Duty;
+```
+
+Optionen:
+
+- `DriveMode::Duty`: alter Duty-Modus wie in `.inspiration_files/old_main.rs`
+- `DriveMode::CurrentAndRpm`: Current/RPM-Modus wie die AI-Boot-Skripte
+
+Im Duty-Modus ist bei VESC-ID `22` die Extended-ID `0x00000016`, weil `SET_DUTY = 0` und `0 << 8 | 22 = 0x16`. Payload ist Duty `* 100_000` als `i32` big-endian, mit dem 10er-Glättungsfenster aus der alten Firmware.
+
+Im Current/RPM-Modus sendet die Firmware:
 
 - kleines Gas: `SET_CURRENT`, also Drehmoment/Strom zum sauberen Anfahren
 - danach: `SET_RPM`, also ERPM-Ziel mit Rampe zum ruhigeren Beschleunigen
-
-CAN-Kontrolle: Beim alten Duty-Modus war bei VESC-ID `22` die Extended-ID `0x00000016`, weil `SET_DUTY = 0` und `0 << 8 | 22 = 0x16`. Jetzt sollte man stattdessen sehen:
 
 - `SET_CURRENT`: `0x00000116`, Payload = Ampere `* 1000` als 4 Byte big-endian
 - `SET_RPM`: `0x00000316`, Payload = ERPM als 4 Byte big-endian

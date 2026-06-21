@@ -49,13 +49,17 @@ use bsp::hal::{
 };
 
 const VESC_ID: u32 = 22;
+const CAN_PACKET_SET_DUTY: u32 = 0;
 const CAN_PACKET_SET_CURRENT: u32 = 1;
 const CAN_PACKET_SET_RPM: u32 = 3;
 
+const CAN_ID_SET_DUTY: Option<ExtendedId> =
+    ExtendedId::new((CAN_PACKET_SET_DUTY << 8) | VESC_ID);
 const CAN_ID_SET_CURRENT: Option<ExtendedId> =
     ExtendedId::new((CAN_PACKET_SET_CURRENT << 8) | VESC_ID);
 const CAN_ID_SET_RPM: Option<ExtendedId> = ExtendedId::new((CAN_PACKET_SET_RPM << 8) | VESC_ID);
 
+const DRIVE_MODE: DriveMode = DriveMode::Duty;
 const DELAY_MS: u32 = 100;
 const CONTROL_DT_S: f32 = DELAY_MS as f32 / 1000.0;
 
@@ -89,7 +93,12 @@ const ENCODER_REVERSE_MAX_COUNTS: i32 = 3560;
 // 3-pin Hall connector on A3. Change this if the replacement Hall sensor
 // reports the opposite level when the magnet/kill-cord is present.
 const HALL_PRESENT_WHEN_LOW: bool = true;
-const PRETEND_HALL_PIN_ON: bool = true;
+
+#[allow(dead_code)]
+enum DriveMode {
+    Duty,
+    CurrentAndRpm,
+}
 
 #[entry]
 fn main() -> ! {
@@ -171,6 +180,7 @@ fn main() -> ! {
 
     let mut engine_locked = true;
     let mut controller = VescController::new();
+    let mut duty_controller = DutyController::new();
 
     loop {
         poll_usb_serial(&mut usb_dev, &mut serial);
@@ -199,13 +209,9 @@ fn main() -> ! {
                 }
             };
 
-        let kill_cord_present = if PRETEND_HALL_PIN_ON {
-            true
-        } else {
-            match hall_pin.is_low() {
-                Ok(is_low) => is_low == HALL_PRESENT_WHEN_LOW,
-                Err(_) => false,
-            }
+        let kill_cord_present = match hall_pin.is_low() {
+            Ok(is_low) => is_low == HALL_PRESENT_WHEN_LOW,
+            Err(_) => false,
         };
 
         if !kill_cord_present {
@@ -226,28 +232,50 @@ fn main() -> ! {
 
         info!("throttle: {}", throttle);
 
-        let command = if engine_locked {
-            controller.stop_now()
-        } else {
-            controller.update(throttle)
-        };
-        let frame = match command {
-            VescCommand::Current(current) => CanFrame::new(
-                CAN_ID_SET_CURRENT.unwrap(),
-                &((current * 1000.0) as i32).to_be_bytes(),
-            )
-            .unwrap(),
-            VescCommand::Rpm(rpm) => {
-                CanFrame::new(CAN_ID_SET_RPM.unwrap(), &(rpm as i32).to_be_bytes()).unwrap()
+        let frame = match DRIVE_MODE {
+            DriveMode::Duty => duty_controller.update(throttle).map(|duty| {
+                CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &duty.to_be_bytes()).unwrap()
+            }),
+            DriveMode::CurrentAndRpm => {
+                let command = if engine_locked {
+                    controller.stop_now()
+                } else {
+                    controller.update(throttle)
+                };
+                Some(match command {
+                    VescCommand::Current(current) => CanFrame::new(
+                        CAN_ID_SET_CURRENT.unwrap(),
+                        &((current * 1000.0) as i32).to_be_bytes(),
+                    )
+                    .unwrap(),
+                    VescCommand::Rpm(rpm) => {
+                        CanFrame::new(CAN_ID_SET_RPM.unwrap(), &(rpm as i32).to_be_bytes())
+                            .unwrap()
+                    }
+                })
             }
         };
 
-        let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
-            .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
+        if let Some(frame) = frame {
+            let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
+                .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
+        }
 
-        timer.delay_ms(DELAY_MS / 2);
+        delay_ms_with_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
         led_green.set_low().unwrap();
-        timer.delay_ms(DELAY_MS / 2);
+        delay_ms_with_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
+    }
+}
+
+fn delay_ms_with_usb_poll(
+    timer: &mut Timer,
+    usb_dev: &mut UsbDevice<UsbBus>,
+    serial: &mut SerialPort<UsbBus>,
+    ms: u32,
+) {
+    for _ in 0..ms {
+        poll_usb_serial(usb_dev, serial);
+        timer.delay_ms(1);
     }
 }
 
@@ -276,6 +304,39 @@ fn write_usb_line(serial: &mut SerialPort<UsbBus>, line: &str) {
 enum VescCommand {
     Current(f32),
     Rpm(f32),
+}
+
+struct DutyController {
+    smooth: [i32; 10],
+    index: usize,
+}
+
+impl DutyController {
+    fn new() -> Self {
+        Self {
+            smooth: [0; 10],
+            index: 0,
+        }
+    }
+
+    fn update(&mut self, throttle: f32) -> Option<i32> {
+        let throttle = (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32;
+
+        if self.index >= self.smooth.len() {
+            self.index = 0;
+        }
+
+        if throttle == 0 {
+            return None;
+        }
+
+        self.smooth[self.index] = throttle;
+        let smoothed_throttle: i32 =
+            (self.smooth.iter().sum::<i32>() as f32 / self.smooth.len() as f32) as i32;
+        self.index += 1;
+
+        Some(smoothed_throttle)
+    }
 }
 
 enum ControlMode {
