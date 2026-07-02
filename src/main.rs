@@ -82,7 +82,7 @@ const ENCODER_REVERSE_MAX_COUNTS: i32 = 3560;
 // 3-pin Hall connector on A3. Change this if the replacement Hall sensor
 // reports the opposite level when the magnet/kill-cord is present.
 const HALL_PRESENT_WHEN_LOW: bool = true;
-const PRETEND_HALL_PIN_ON: bool = true;
+const PRETEND_HALL_PIN_ON: bool = false;
 
 #[entry]
 fn main() -> ! {
