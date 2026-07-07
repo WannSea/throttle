@@ -73,11 +73,11 @@ const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
 // 1. Put the throttle in neutral/rest position and copy the logged raw angle here.
 // 2. Move the throttle in the desired forward direction.
 // 3. If the logged signed offset gets negative, set ENCODER_FORWARD_SIGN to -1.
-const ENCODER_ZERO_RAW: u16 = 380;
+const ENCODER_ZERO_RAW: u16 = 2237;
 const ENCODER_FORWARD_SIGN: i32 = 1;
 const ENCODER_DEADZONE_COUNTS: i32 = 50;
-const ENCODER_FORWARD_MAX_COUNTS: i32 = 3560;
-const ENCODER_REVERSE_MAX_COUNTS: i32 = 3560;
+const ENCODER_FORWARD_MAX_COUNTS: i32 = 2382;
+const ENCODER_REVERSE_MAX_COUNTS: i32 = 1315;
 
 // 3-pin Hall connector on A3. Change this if the replacement Hall sensor
 // reports the opposite level when the magnet/kill-cord is present.
