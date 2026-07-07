@@ -63,7 +63,8 @@ const VESC_ID: u32 = 22;
 const CAN_ID_SET_DUTY: Option<ExtendedId> =
     ExtendedId::new((CanCommands::SetDuty as u32) << 8 | VESC_ID);
 
-const DELAY_MS: u32 = 100;
+const DELAY_MS: u32 = 20;
+const SMOOTH_SAMPLES: usize = 50;
 
 // AS5600 magnetic encoder on the 5-pin connector
 const AS5600_I2C_ADDRESS: u8 = 0x36;
@@ -169,7 +170,7 @@ fn main() -> ! {
     let mut angle_buff: [u8; 2] = [0; 2];
 
     let mut engine_locked = true;
-    let mut smooth: [i32; 10] = [0; 10];
+    let mut smooth: [i32; SMOOTH_SAMPLES] = [0; SMOOTH_SAMPLES];
     let mut index = 0;
 
     loop {
@@ -227,16 +228,16 @@ fn main() -> ! {
             index = 0;
         }
 
-        if throttle == 0 {
-            continue;
-        }
-
-        smooth[index] = throttle;
-        let smoothed_throttle: i32 =
-            (smooth.iter().sum::<i32>() as f32 / smooth.len() as f32) as i32;
+        let transmit_throttle = if throttle == 0 {
+            smooth = [0; SMOOTH_SAMPLES];
+            0
+        } else {
+            smooth[index] = throttle;
+            (smooth.iter().sum::<i32>() as f32 / smooth.len() as f32) as i32
+        };
 
         let frame =
-            CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &smoothed_throttle.to_be_bytes()).unwrap();
+            CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &transmit_throttle.to_be_bytes()).unwrap();
         let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
             .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
 
