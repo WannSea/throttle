@@ -8,7 +8,7 @@ use core::fmt::Write;
 use defmt::*;
 use defmt_rtt as _;
 use embedded_can::nb::Can;
-use embedded_can::{ExtendedId, Frame};
+use embedded_can::{ExtendedId, Frame, Id};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::i2c::I2c;
@@ -62,6 +62,8 @@ enum CanCommands {
 const VESC_ID: u32 = 22;
 const CAN_ID_SET_CURRENT: Option<ExtendedId> =
     ExtendedId::new((CanCommands::SetCurrent as u32) << 8 | VESC_ID);
+const CAN_ID_UNLOCK_THROTTLE: Option<ExtendedId> = ExtendedId::new(0x00000F55);
+const CAN_UNLOCK_THROTTLE_DATA: [u8; 1] = [0xA5];
 
 const DELAY_MS: u32 = 20;
 const SMOOTH_SAMPLES: usize = 50;
@@ -171,11 +173,15 @@ fn main() -> ! {
     let mut angle_buff: [u8; 2] = [0; 2];
 
     let mut engine_locked = true;
+    let mut can_unlock_received = false;
     let mut smooth: [i32; SMOOTH_SAMPLES] = [0; SMOOTH_SAMPLES];
     let mut index = 0;
 
     loop {
         poll_usb_serial(&mut usb_dev, &mut serial);
+        if poll_can_unlock(&mut can_bus) {
+            can_unlock_received = true;
+        }
 
         led_green.set_high().unwrap();
         // use rp-pico 0.9
@@ -209,9 +215,10 @@ fn main() -> ! {
 
         if !kill_cord_present {
             engine_locked = true;
+            can_unlock_received = false;
         }
 
-        if kill_cord_present && current == 0 {
+        if kill_cord_present && can_unlock_received && current == 0 {
             engine_locked = false;
         }
 
@@ -247,6 +254,20 @@ fn main() -> ! {
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
         index += 1;
     }
+}
+
+fn poll_can_unlock(can_bus: &mut Can2040) -> bool {
+    let mut unlock_received = false;
+
+    while let Ok(frame) = <Can2040 as Can>::receive(can_bus) {
+        if frame.id() == Id::Extended(CAN_ID_UNLOCK_THROTTLE.unwrap())
+            && frame.data() == CAN_UNLOCK_THROTTLE_DATA
+        {
+            unlock_received = true;
+        }
+    }
+
+    unlock_received
 }
 
 fn delay_ms_maybe_usb_poll(
