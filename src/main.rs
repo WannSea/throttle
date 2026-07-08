@@ -64,6 +64,7 @@ const CAN_ID_SET_CURRENT: Option<ExtendedId> =
     ExtendedId::new((CanCommands::SetCurrent as u32) << 8 | VESC_ID);
 const CAN_ID_UNLOCK_THROTTLE: Option<ExtendedId> = ExtendedId::new(0x00000F55);
 const CAN_UNLOCK_THROTTLE_DATA: [u8; 1] = [0xA5];
+const CAN_ID_THROTTLE_LOCK_STATUS: Option<ExtendedId> = ExtendedId::new(0x00000F56);
 
 const DELAY_MS: u32 = 20;
 const SMOOTH_SAMPLES: usize = 50;
@@ -244,10 +245,18 @@ fn main() -> ! {
             (smooth.iter().sum::<i32>() as f32 / smooth.len() as f32) as i32
         };
 
-        let frame =
-            CanFrame::new(CAN_ID_SET_CURRENT.unwrap(), &transmit_throttle.to_be_bytes()).unwrap();
+        let frame = CanFrame::new(
+            CAN_ID_SET_CURRENT.unwrap(),
+            &transmit_throttle.to_be_bytes(),
+        )
+        .unwrap();
         let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
             .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
+
+        let lock_status_frame =
+            CanFrame::new(CAN_ID_THROTTLE_LOCK_STATUS.unwrap(), &[engine_locked as u8]).unwrap();
+        let _ = <Can2040 as Can>::transmit(&mut can_bus, &lock_status_frame)
+            .inspect_err(|_e| warn!("CAN TX error would block: dropping lock status Frame"));
 
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
         led_green.set_low().unwrap();
