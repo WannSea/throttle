@@ -78,8 +78,8 @@ Für Encoder-Kalibrierung über USB-C auf `true` setzen.
 4. Gashebel in die gewünschte Vorwärtsrichtung bewegen:
    - Wenn `offset` positiv wird: `ENCODER_FORWARD_SIGN = 1`
    - Wenn `offset` negativ wird: `ENCODER_FORWARD_SIGN = -1`
-5. Am Vorwärts-Endanschlag den Betrag von `offset` bei `ENCODER_FORWARD_MAX_COUNTS` eintragen.
-6. Am Rückwärts-Endanschlag den Betrag von `offset` bei `ENCODER_REVERSE_MAX_COUNTS` eintragen.
+5. Am Vorwärts-Endanschlag den angezeigten `encoder raw`-Wert bei `ENCODER_FORWARD_MAX_RAW` eintragen.
+6. Am Rückwärts-Endanschlag den angezeigten `encoder raw`-Wert bei `ENCODER_REVERSE_MAX_RAW` eintragen.
 7. `ENCODER_DEADZONE_COUNTS` ist die symmetrische Nullzone um 0: bei `35` gilt also `-35..+35` als 0. Wenn der Hebel in Ruhe nicht sauber 0 bleibt, etwas größer machen.
 
 Der 3-polige Hall-Stecker ist `HALL`, `GND`, `5V` und liegt in der Firmware auf `pins.a3`. Er wird aktuell nur als Kill-/Freigabe-Signal benutzt, nicht als Drehzahl- oder Richtungssensor. Wichtig: Die `HALL`-Leitung geht zum RP2040 und hat einen 3.3V-Pullup; der neue Sensor sollte deshalb einen Open-Collector/Open-Drain-Ausgang oder einen 3.3V-kompatiblen Ausgang haben, nicht aktiv 5V auf `HALL` treiben. Wenn der neue Hall-Sensor umgekehrt schaltet, ändere in `src/main.rs` nur:

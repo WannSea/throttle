@@ -26,7 +26,7 @@ use seeeduino_xiao_rp2040 as bsp;
 const CONFIG_CANBUS_FREQUENCY: u32 = 250_000;
 const CONFIG_RP2040_CANBUS_GPIO_RX: u32 = 26;
 const CONFIG_RP2040_CANBUS_GPIO_TX: u32 = 27;
-const ENABLE_USB_LOGGING: bool = false;
+const ENABLE_USB_LOGGING: bool = true;
 
 #[global_allocator]
 pub static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
@@ -67,7 +67,6 @@ const CAN_UNLOCK_THROTTLE_DATA: [u8; 1] = [0xA5];
 const CAN_ID_THROTTLE_LOCK_STATUS: Option<ExtendedId> = ExtendedId::new(0x00000F56);
 
 const DELAY_MS: u32 = 20;
-const SMOOTH_SAMPLES: usize = 50;
 const MAX_CURRENT_A: f32 = 300.0;
 
 // AS5600 magnetic encoder on the 5-pin connector
@@ -79,10 +78,10 @@ const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
 // 2. Move the throttle in the desired forward direction.
 // 3. If the logged signed offset gets negative, set ENCODER_FORWARD_SIGN to -1.
 const ENCODER_ZERO_RAW: u16 = 2237;
-const ENCODER_FORWARD_SIGN: i32 = 1;
-const ENCODER_DEADZONE_COUNTS: i32 = 50;
-const ENCODER_FORWARD_MAX_COUNTS: i32 = 2382;
-const ENCODER_REVERSE_MAX_COUNTS: i32 = 1315;
+const ENCODER_FORWARD_SIGN: i32 = -1;
+const ENCODER_DEADZONE_COUNTS: i32 = 100;
+const ENCODER_FORWARD_MAX_RAW: u16 = 1687;
+const ENCODER_REVERSE_MAX_RAW: u16 = 2790;
 
 // 3-pin Hall connector on A3. Change this if the replacement Hall sensor
 // reports the opposite level when the magnet/kill-cord is present.
@@ -175,8 +174,6 @@ fn main() -> ! {
 
     let mut engine_locked = true;
     let mut can_unlock_received = false;
-    let mut smooth: [i32; SMOOTH_SAMPLES] = [0; SMOOTH_SAMPLES];
-    let mut index = 0;
 
     loop {
         poll_usb_serial(&mut usb_dev, &mut serial);
@@ -233,23 +230,7 @@ fn main() -> ! {
 
         info!("throttle: {}", throttle);
 
-        if index >= smooth.len() {
-            index = 0;
-        }
-
-        let transmit_throttle = if throttle == 0 {
-            smooth = [0; SMOOTH_SAMPLES];
-            0
-        } else {
-            smooth[index] = throttle;
-            (smooth.iter().sum::<i32>() as f32 / smooth.len() as f32) as i32
-        };
-
-        let frame = CanFrame::new(
-            CAN_ID_SET_CURRENT.unwrap(),
-            &transmit_throttle.to_be_bytes(),
-        )
-        .unwrap();
+        let frame = CanFrame::new(CAN_ID_SET_CURRENT.unwrap(), &throttle.to_be_bytes()).unwrap();
         let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
             .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
 
@@ -261,7 +242,6 @@ fn main() -> ! {
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
         led_green.set_low().unwrap();
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
-        index += 1;
     }
 }
 
@@ -349,10 +329,10 @@ fn throttle_from_angle(angle: u16) -> f32 {
 
     let throttle = if offset > 0 {
         (offset - ENCODER_DEADZONE_COUNTS) as f32
-            / (ENCODER_FORWARD_MAX_COUNTS - ENCODER_DEADZONE_COUNTS) as f32
+            / (encoder_offset(ENCODER_FORWARD_MAX_RAW).abs() - ENCODER_DEADZONE_COUNTS) as f32
     } else {
         (offset + ENCODER_DEADZONE_COUNTS) as f32
-            / (ENCODER_REVERSE_MAX_COUNTS - ENCODER_DEADZONE_COUNTS) as f32
+            / (encoder_offset(ENCODER_REVERSE_MAX_RAW).abs() - ENCODER_DEADZONE_COUNTS) as f32
     };
 
     throttle.clamp(-1.0, 1.0)
