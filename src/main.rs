@@ -68,7 +68,7 @@ const CAN_ID_THROTTLE_LOCK_STATUS: Option<ExtendedId> = ExtendedId::new(0x00000F
 
 const DELAY_MS: u32 = 20;
 const SMOOTH_SAMPLES: usize = 100;
-const MAX_CURRENT_A: f32 = 450.0;
+const MAX_CURRENT_A: f32 = 400.0;
 // AS5600 magnetic encoder on the 5-pin connector
 const AS5600_I2C_ADDRESS: u8 = 0x36;
 const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
