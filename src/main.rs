@@ -60,15 +60,14 @@ enum CanCommands {
 }
 
 const VESC_ID: u32 = 22;
-const CAN_ID_SET_CURRENT: Option<ExtendedId> =
-    ExtendedId::new((CanCommands::SetCurrent as u32) << 8 | VESC_ID);
+const CAN_ID_SET_DUTY: Option<ExtendedId> =
+    ExtendedId::new((CanCommands::SetDuty as u32) << 8 | VESC_ID);
 const CAN_ID_UNLOCK_THROTTLE: Option<ExtendedId> = ExtendedId::new(0x00000F55);
 const CAN_UNLOCK_THROTTLE_DATA: [u8; 1] = [0xA5];
 const CAN_ID_THROTTLE_LOCK_STATUS: Option<ExtendedId> = ExtendedId::new(0x00000F56);
 
 const DELAY_MS: u32 = 20;
-const MAX_CURRENT_A: f32 = 300.0;
-
+const SMOOTH_SAMPLES: usize = 100;
 // AS5600 magnetic encoder on the 5-pin connector
 const AS5600_I2C_ADDRESS: u8 = 0x36;
 const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
@@ -78,7 +77,7 @@ const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
 // 2. Move the throttle in the desired forward direction.
 // 3. If the logged signed offset gets negative, set ENCODER_FORWARD_SIGN to -1.
 const ENCODER_ZERO_RAW: u16 = 2237;
-const ENCODER_FORWARD_SIGN: i32 = -1;
+const ENCODER_FORWARD_SIGN: i32 = 1;
 const ENCODER_DEADZONE_COUNTS: i32 = 100;
 const ENCODER_FORWARD_MAX_RAW: u16 = 1687;
 const ENCODER_REVERSE_MAX_RAW: u16 = 2790;
@@ -174,6 +173,8 @@ fn main() -> ! {
 
     let mut engine_locked = true;
     let mut can_unlock_received = false;
+    let mut smooth: [i32; SMOOTH_SAMPLES] = [0; SMOOTH_SAMPLES];
+    let mut index = 0;
 
     loop {
         poll_usb_serial(&mut usb_dev, &mut serial);
@@ -183,7 +184,7 @@ fn main() -> ! {
 
         led_green.set_high().unwrap();
         // use rp-pico 0.9
-        let current: i32 = match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
+        let duty: i32 = match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
             Ok(_) => {
                 let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
                 let throttle = throttle_from_angle(angle);
@@ -193,7 +194,7 @@ fn main() -> ! {
                     angle, offset, throttle
                 );
                 write_usb_encoder_log(&mut serial, angle, offset, throttle);
-                current_from_throttle(throttle)
+                duty_from_throttle(throttle)
             }
             Err(_e) => {
                 warn!("could not read from i2c");
@@ -216,7 +217,7 @@ fn main() -> ! {
             can_unlock_received = false;
         }
 
-        if kill_cord_present && can_unlock_received && current == 0 {
+        if kill_cord_present && can_unlock_received && duty == 0 {
             engine_locked = false;
         }
 
@@ -225,12 +226,25 @@ fn main() -> ! {
             0
         } else {
             led_red.set_high().unwrap();
-            current
+            duty
         };
 
         info!("throttle: {}", throttle);
 
-        let frame = CanFrame::new(CAN_ID_SET_CURRENT.unwrap(), &throttle.to_be_bytes()).unwrap();
+        if index >= smooth.len() {
+            index = 0;
+        }
+
+        let transmit_throttle = if engine_locked {
+            smooth = [0; SMOOTH_SAMPLES];
+            0
+        } else {
+            smooth[index] = throttle;
+            (smooth.iter().sum::<i32>() as f32 / smooth.len() as f32) as i32
+        };
+
+        let frame =
+            CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &transmit_throttle.to_be_bytes()).unwrap();
         let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
             .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
 
@@ -242,6 +256,7 @@ fn main() -> ! {
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
         led_green.set_low().unwrap();
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
+        index += 1;
     }
 }
 
@@ -316,8 +331,8 @@ fn write_usb_line(serial: &mut Option<SerialPort<UsbBus>>, line: &str) {
     }
 }
 
-fn current_from_throttle(throttle: f32) -> i32 {
-    (throttle.clamp(-1.0, 1.0) * MAX_CURRENT_A * 1000.0) as i32
+fn duty_from_throttle(throttle: f32) -> i32 {
+    (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32
 }
 
 fn throttle_from_angle(angle: u16) -> f32 {
