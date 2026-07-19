@@ -8,7 +8,7 @@ use core::fmt::Write;
 use defmt::*;
 use defmt_rtt as _;
 use embedded_can::nb::Can;
-use embedded_can::{ExtendedId, Frame, Id};
+use embedded_can::{ExtendedId, Frame};
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal::i2c::I2c;
@@ -26,7 +26,7 @@ use seeeduino_xiao_rp2040 as bsp;
 const CONFIG_CANBUS_FREQUENCY: u32 = 250_000;
 const CONFIG_RP2040_CANBUS_GPIO_RX: u32 = 26;
 const CONFIG_RP2040_CANBUS_GPIO_TX: u32 = 27;
-const ENABLE_USB_LOGGING: bool = true;
+const ENABLE_USB_LOGGING: bool = false;
 
 #[global_allocator]
 pub static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
@@ -60,15 +60,12 @@ enum CanCommands {
 }
 
 const VESC_ID: u32 = 22;
-const CAN_ID_SET_CURRENT: Option<ExtendedId> =
-    ExtendedId::new((CanCommands::SetCurrent as u32) << 8 | VESC_ID);
-const CAN_ID_UNLOCK_THROTTLE: Option<ExtendedId> = ExtendedId::new(0x00000F55);
-const CAN_UNLOCK_THROTTLE_DATA: [u8; 1] = [0xA5];
-const CAN_ID_THROTTLE_LOCK_STATUS: Option<ExtendedId> = ExtendedId::new(0x00000F56);
+const CAN_ID_SET_DUTY: Option<ExtendedId> =
+    ExtendedId::new((CanCommands::SetDuty as u32) << 8 | VESC_ID);
 
 const DELAY_MS: u32 = 20;
-const SMOOTH_SAMPLES: usize = 100;
-const MAX_CURRENT_A: f32 = 400.0;
+const SMOOTH_SAMPLES: usize = 50;
+
 // AS5600 magnetic encoder on the 5-pin connector
 const AS5600_I2C_ADDRESS: u8 = 0x36;
 const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
@@ -79,9 +76,9 @@ const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
 // 3. If the logged signed offset gets negative, set ENCODER_FORWARD_SIGN to -1.
 const ENCODER_ZERO_RAW: u16 = 2237;
 const ENCODER_FORWARD_SIGN: i32 = 1;
-const ENCODER_DEADZONE_COUNTS: i32 = 100;
-const ENCODER_FORWARD_MAX_RAW: u16 = 1687;
-const ENCODER_REVERSE_MAX_RAW: u16 = 2790;
+const ENCODER_DEADZONE_COUNTS: i32 = 50;
+const ENCODER_FORWARD_MAX_COUNTS: i32 = 2382;
+const ENCODER_REVERSE_MAX_COUNTS: i32 = 1315;
 
 // 3-pin Hall connector on A3. Change this if the replacement Hall sensor
 // reports the opposite level when the magnet/kill-cord is present.
@@ -173,19 +170,15 @@ fn main() -> ! {
     let mut angle_buff: [u8; 2] = [0; 2];
 
     let mut engine_locked = true;
-    let mut can_unlock_received = false;
     let mut smooth: [i32; SMOOTH_SAMPLES] = [0; SMOOTH_SAMPLES];
     let mut index = 0;
 
     loop {
         poll_usb_serial(&mut usb_dev, &mut serial);
-        if poll_can_unlock(&mut can_bus) {
-            can_unlock_received = true;
-        }
 
         led_green.set_high().unwrap();
         // use rp-pico 0.9
-        let current: i32 = match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
+        let duty: i32 = match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
             Ok(_) => {
                 let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
                 let throttle = throttle_from_angle(angle);
@@ -195,7 +188,7 @@ fn main() -> ! {
                     angle, offset, throttle
                 );
                 write_usb_encoder_log(&mut serial, angle, offset, throttle);
-                current_from_throttle(throttle)
+                duty_from_throttle(throttle)
             }
             Err(_e) => {
                 warn!("could not read from i2c");
@@ -215,10 +208,9 @@ fn main() -> ! {
 
         if !kill_cord_present {
             engine_locked = true;
-            can_unlock_received = false;
         }
 
-        if kill_cord_present && can_unlock_received && current == 0 {
+        if kill_cord_present && duty == 0 {
             engine_locked = false;
         }
 
@@ -227,7 +219,7 @@ fn main() -> ! {
             0
         } else {
             led_red.set_high().unwrap();
-            current
+            duty
         };
 
         info!("throttle: {}", throttle);
@@ -236,7 +228,7 @@ fn main() -> ! {
             index = 0;
         }
 
-        let transmit_current = if engine_locked {
+        let transmit_duty = if engine_locked {
             smooth = [0; SMOOTH_SAMPLES];
             0
         } else {
@@ -245,34 +237,15 @@ fn main() -> ! {
         };
 
         let frame =
-            CanFrame::new(CAN_ID_SET_CURRENT.unwrap(), &transmit_current.to_be_bytes()).unwrap();
+            CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &transmit_duty.to_be_bytes()).unwrap();
         let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
             .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
-
-        let lock_status_frame =
-            CanFrame::new(CAN_ID_THROTTLE_LOCK_STATUS.unwrap(), &[engine_locked as u8]).unwrap();
-        let _ = <Can2040 as Can>::transmit(&mut can_bus, &lock_status_frame)
-            .inspect_err(|_e| warn!("CAN TX error would block: dropping lock status Frame"));
 
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
         led_green.set_low().unwrap();
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
         index += 1;
     }
-}
-
-fn poll_can_unlock(can_bus: &mut Can2040) -> bool {
-    let mut unlock_received = false;
-
-    while let Ok(frame) = <Can2040 as Can>::receive(can_bus) {
-        if frame.id() == Id::Extended(CAN_ID_UNLOCK_THROTTLE.unwrap())
-            && frame.data() == CAN_UNLOCK_THROTTLE_DATA
-        {
-            unlock_received = true;
-        }
-    }
-
-    unlock_received
 }
 
 fn delay_ms_maybe_usb_poll(
@@ -332,8 +305,8 @@ fn write_usb_line(serial: &mut Option<SerialPort<UsbBus>>, line: &str) {
     }
 }
 
-fn current_from_throttle(throttle: f32) -> i32 {
-    (throttle.clamp(-1.0, 1.0) * MAX_CURRENT_A * 1000.0) as i32
+fn duty_from_throttle(throttle: f32) -> i32 {
+    (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32
 }
 
 fn throttle_from_angle(angle: u16) -> f32 {
@@ -345,10 +318,10 @@ fn throttle_from_angle(angle: u16) -> f32 {
 
     let throttle = if offset > 0 {
         (offset - ENCODER_DEADZONE_COUNTS) as f32
-            / (encoder_offset(ENCODER_FORWARD_MAX_RAW).abs() - ENCODER_DEADZONE_COUNTS) as f32
+            / (ENCODER_FORWARD_MAX_COUNTS - ENCODER_DEADZONE_COUNTS) as f32
     } else {
         (offset + ENCODER_DEADZONE_COUNTS) as f32
-            / (encoder_offset(ENCODER_REVERSE_MAX_RAW).abs() - ENCODER_DEADZONE_COUNTS) as f32
+            / (ENCODER_REVERSE_MAX_COUNTS - ENCODER_DEADZONE_COUNTS) as f32
     };
 
     throttle.clamp(-1.0, 1.0)
