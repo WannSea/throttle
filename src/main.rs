@@ -77,8 +77,8 @@ const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
 const ENCODER_ZERO_RAW: u16 = 2237;
 const ENCODER_FORWARD_SIGN: i32 = 1;
 const ENCODER_DEADZONE_COUNTS: i32 = 50;
-const ENCODER_FORWARD_MAX_COUNTS: i32 = 2382;
-const ENCODER_REVERSE_MAX_COUNTS: i32 = 1315;
+const ENCODER_FORWARD_MAX_RAW: u16 = 1687;
+const ENCODER_REVERSE_MAX_RAW: u16 = 2790;
 
 // 3-pin Hall connector on A3. Change this if the replacement Hall sensor
 // reports the opposite level when the magnet/kill-cord is present.
@@ -318,10 +318,10 @@ fn throttle_from_angle(angle: u16) -> f32 {
 
     let throttle = if offset > 0 {
         (offset - ENCODER_DEADZONE_COUNTS) as f32
-            / (ENCODER_FORWARD_MAX_COUNTS - ENCODER_DEADZONE_COUNTS) as f32
+            / (encoder_offset(ENCODER_FORWARD_MAX_RAW).abs() - ENCODER_DEADZONE_COUNTS) as f32
     } else {
         (offset + ENCODER_DEADZONE_COUNTS) as f32
-            / (ENCODER_REVERSE_MAX_COUNTS - ENCODER_DEADZONE_COUNTS) as f32
+            / (encoder_offset(ENCODER_REVERSE_MAX_RAW).abs() - ENCODER_DEADZONE_COUNTS) as f32
     };
 
     throttle.clamp(-1.0, 1.0)
