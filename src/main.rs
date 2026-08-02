@@ -26,7 +26,7 @@ use seeeduino_xiao_rp2040 as bsp;
 const CONFIG_CANBUS_FREQUENCY: u32 = 250_000;
 const CONFIG_RP2040_CANBUS_GPIO_RX: u32 = 26;
 const CONFIG_RP2040_CANBUS_GPIO_TX: u32 = 27;
-const ENABLE_USB_LOGGING: bool = false;
+const ENABLE_USB_LOGGING: bool = true;
 
 #[global_allocator]
 pub static ALLOCATOR: CortexMHeap = CortexMHeap::empty();
@@ -72,17 +72,14 @@ const AS5600_RAW_ANGLE_REGISTER: u8 = 0x0C;
 
 // Encoder calibration:
 // 1. Put the throttle in neutral/rest position and copy the logged raw angle here.
-// 2. Move the throttle in the desired forward direction.
-// 3. If the logged signed offset gets negative, set ENCODER_FORWARD_SIGN to -1.
+// 2. Move the throttle in the desired forward direction and enter the value for FORWARD_MAX_RAW. Same for backwards.
+// 3. Deadzone: the deadzone range from neutral into one direction (2 ways, so the total deadzone size is this value * 2)
 const ENCODER_ZERO_RAW: u16 = 2237;
-const ENCODER_FORWARD_SIGN: i32 = 1;
 const ENCODER_DEADZONE_COUNTS: i32 = 50;
 const ENCODER_FORWARD_MAX_RAW: u16 = 1687;
 const ENCODER_REVERSE_MAX_RAW: u16 = 2790;
 
-// 3-pin Hall connector on A3. Change this if the replacement Hall sensor
-// reports the opposite level when the magnet/kill-cord is present.
-const HALL_PRESENT_WHEN_LOW: bool = true;
+// Disable Safety Cord, pretend Kill Cord is always there
 const PRETEND_HALL_PIN_ON: bool = false;
 
 #[entry]
@@ -201,7 +198,7 @@ fn main() -> ! {
             true
         } else {
             match hall_pin.is_low() {
-                Ok(is_low) => is_low == HALL_PRESENT_WHEN_LOW,
+                Ok(is_low) => is_low,
                 Err(_) => false,
             }
         };
@@ -328,6 +325,5 @@ fn throttle_from_angle(angle: u16) -> f32 {
 }
 
 fn encoder_offset(angle: u16) -> i32 {
-    let raw_offset = angle as i32 - ENCODER_ZERO_RAW as i32;
-    raw_offset * ENCODER_FORWARD_SIGN
+    angle as i32 - ENCODER_ZERO_RAW as i32
 }
