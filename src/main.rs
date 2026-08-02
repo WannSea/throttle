@@ -60,11 +60,11 @@ enum CanCommands {
 }
 
 const VESC_ID: u32 = 22;
-const CAN_ID_SET_DUTY: Option<ExtendedId> =
-    ExtendedId::new((CanCommands::SetDuty as u32) << 8 | VESC_ID);
+const CAN_ID_SET_CURRENT_RAW: u32 = (CanCommands::SetCurrent as u32) << 8 | VESC_ID;
+const CAN_ID_SET_CURRENT: Option<ExtendedId> = ExtendedId::new(CAN_ID_SET_CURRENT_RAW);
 
 const DELAY_MS: u32 = 20;
-const SMOOTH_SAMPLES: usize = 50;
+const MAX_CURRENT_A: f32 = 500.0;
 
 // AS5600 magnetic encoder on the 5-pin connector
 const AS5600_I2C_ADDRESS: u8 = 0x36;
@@ -167,32 +167,30 @@ fn main() -> ! {
     let mut angle_buff: [u8; 2] = [0; 2];
 
     let mut engine_locked = true;
-    let mut smooth: [i32; SMOOTH_SAMPLES] = [0; SMOOTH_SAMPLES];
-    let mut index = 0;
 
     loop {
         poll_usb_serial(&mut usb_dev, &mut serial);
 
         led_green.set_high().unwrap();
         // use rp-pico 0.9
-        let duty: i32 = match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
-            Ok(_) => {
-                let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
-                let throttle = throttle_from_angle(angle);
-                let offset = encoder_offset(angle);
-                info!(
-                    "encoder raw: {}, offset: {}, throttle: {}",
-                    angle, offset, throttle
-                );
-                write_usb_encoder_log(&mut serial, angle, offset, throttle);
-                duty_from_throttle(throttle)
-            }
-            Err(_e) => {
-                warn!("could not read from i2c");
-                write_usb_line(&mut serial, "could not read from i2c\r\n");
-                0
-            }
-        };
+        let (current, encoder_reading): (i32, Option<(u16, f32)>) =
+            match i2c.write_read(AS5600_I2C_ADDRESS, &registers, &mut angle_buff) {
+                Ok(_) => {
+                    let angle = (((angle_buff[0] as u16) << 8) | angle_buff[1] as u16) & 0x0fff;
+                    let throttle = throttle_from_angle(angle);
+                    let offset = encoder_offset(angle);
+                    info!(
+                        "encoder raw: {}, offset: {}, throttle: {}",
+                        angle, offset, throttle
+                    );
+                    (current_from_throttle(throttle), Some((angle, throttle)))
+                }
+                Err(_e) => {
+                    warn!("could not read from i2c");
+                    write_usb_line(&mut serial, "could not read from i2c\r\n");
+                    (0, None)
+                }
+            };
 
         let kill_cord_present = if PRETEND_HALL_PIN_ON {
             true
@@ -207,41 +205,31 @@ fn main() -> ! {
             engine_locked = true;
         }
 
-        if kill_cord_present && duty == 0 {
+        if kill_cord_present && current == 0 {
             engine_locked = false;
         }
 
-        let throttle = if engine_locked {
+        let transmit_current = if engine_locked {
             led_red.set_low().unwrap();
             0
         } else {
             led_red.set_high().unwrap();
-            duty
+            current
         };
 
-        info!("throttle: {}", throttle);
-
-        if index >= smooth.len() {
-            index = 0;
+        info!("current: {}", transmit_current);
+        if let Some((angle, throttle)) = encoder_reading {
+            write_usb_encoder_log(&mut serial, angle, throttle, transmit_current);
         }
 
-        let transmit_duty = if engine_locked {
-            smooth = [0; SMOOTH_SAMPLES];
-            0
-        } else {
-            smooth[index] = throttle;
-            (smooth.iter().sum::<i32>() as f32 / smooth.len() as f32) as i32
-        };
-
         let frame =
-            CanFrame::new(CAN_ID_SET_DUTY.unwrap(), &transmit_duty.to_be_bytes()).unwrap();
+            CanFrame::new(CAN_ID_SET_CURRENT.unwrap(), &transmit_current.to_be_bytes()).unwrap();
         let _ = <Can2040 as Can>::transmit(&mut can_bus, &frame)
             .inspect_err(|_e| warn!("CAN TX error would block: dropping Frame"));
 
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
         led_green.set_low().unwrap();
         delay_ms_maybe_usb_poll(&mut timer, &mut usb_dev, &mut serial, DELAY_MS / 2);
-        index += 1;
     }
 }
 
@@ -279,19 +267,19 @@ fn poll_usb_serial(
 fn write_usb_encoder_log(
     serial: &mut Option<SerialPort<UsbBus>>,
     angle: u16,
-    offset: i32,
     throttle: f32,
+    transmit_current: i32,
 ) {
     if !ENABLE_USB_LOGGING {
         return;
     }
 
-    let mut line: String<96> = String::new();
+    let mut line: String<128> = String::new();
     let throttle_milli = (throttle * 1000.0) as i32;
     let _ = writeln!(
         &mut line,
-        "encoder raw: {}, offset: {}, throttle_milli: {}\r",
-        angle, offset, throttle_milli
+        "encoder raw: {}, throttle_milli: {}, can: {:08X}#{:08X}\r",
+        angle, throttle_milli, CAN_ID_SET_CURRENT_RAW, transmit_current as u32
     );
     write_usb_line(serial, line.as_str());
 }
@@ -302,8 +290,8 @@ fn write_usb_line(serial: &mut Option<SerialPort<UsbBus>>, line: &str) {
     }
 }
 
-fn duty_from_throttle(throttle: f32) -> i32 {
-    (throttle.clamp(-1.0, 1.0) * 100_000.0) as i32
+fn current_from_throttle(throttle: f32) -> i32 {
+    (throttle.clamp(-1.0, 1.0) * MAX_CURRENT_A * 1000.0) as i32
 }
 
 fn throttle_from_angle(angle: u16) -> f32 {
